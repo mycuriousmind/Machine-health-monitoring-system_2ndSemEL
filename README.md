@@ -1,2 +1,2 @@
 # Machine-health-monitoring-system_2ndSemEL
-This is the repository of our second semester Experiential Learning(EL) project. We have made a machine health monitoring
+This is the repository of our second-semester Experiential Learning(EL) project. We have made a machine health monitoring system that predicts machine faults and future failures using Convolutional Neural Networks(CNN), displaying them through a centralized dashboard. It also includes a Computer Vision(CV)-enabled interface, which will display the real-time data and status of the machine pointed to.
