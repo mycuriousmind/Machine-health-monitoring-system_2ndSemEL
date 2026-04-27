@@ -41,6 +41,12 @@ void loop() {
   // Read vibration
   int16_t ax, ay, az;
   mpu.getAcceleration(&ax, &ay, &az);
+  
+  // Normalize accelerometer values (MPU6050 default: ±2g range, 16384 LSB/g)
+  float ax_normalized = ax / 16384.0;
+  float ay_normalized = ay / 16384.0;
+  float az_normalized = az / 16384.0;
+  
   float vibration = sqrt(ax*ax + ay*ay + az*az) / 16384.0;
 
   // Read temperature
@@ -51,10 +57,13 @@ void loop() {
   float voltage = (rawCurrent / 4095.0) * 3.3;
   float current = (voltage - 2.5) / 0.185;
 
-  // Print to Serial Monitor
-  Serial.print("Vibration: "); Serial.print(vibration);
-  Serial.print(" | Temp: "); Serial.print(temperature);
-  Serial.print("°C | Current: "); Serial.println(current);
+  // Print to Serial Monitor with individual axes for CNN model
+  Serial.print("AX: "); Serial.print(ax_normalized, 4);
+  Serial.print(" | AY: "); Serial.print(ay_normalized, 4);
+  Serial.print(" | AZ: "); Serial.print(az_normalized, 4);
+  Serial.print(" | Vibration: "); Serial.print(vibration, 4);
+  Serial.print(" | Temp: "); Serial.print(temperature, 2);
+  Serial.print("°C | Current: "); Serial.println(current, 4);
 
   // Fault detection logic
   if (vibration > VIBRATION_THRESHOLD || 
