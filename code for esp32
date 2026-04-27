@@ -58,12 +58,16 @@ void loop() {
   float current = (voltage - 2.5) / 0.185;
 
   // Print to Serial Monitor with individual axes for CNN model
-  Serial.print("AX: "); Serial.print(ax_normalized, 4);
-  Serial.print(" | AY: "); Serial.print(ay_normalized, 4);
-  Serial.print(" | AZ: "); Serial.print(az_normalized, 4);
-  Serial.print(" | Vibration: "); Serial.print(vibration, 4);
-  Serial.print(" | Temp: "); Serial.print(temperature, 2);
-  Serial.print("°C | Current: "); Serial.println(current, 4);
+  // Replace the Serial.print block with this:
+  Serial.print(ax_normalized);
+  Serial.print(",");
+  Serial.print(ay_normalized);
+  Serial.print(",");
+  Serial.print(az_normalized);
+  Serial.print(",");
+  Serial.print(temperature);
+  Serial.print(",");
+  Serial.println(current);
 
   // Fault detection logic
   if (vibration > VIBRATION_THRESHOLD || 
