@@ -386,6 +386,9 @@ print(f"  Precision at this threshold: {precision_vals[idx]:.3f}")
 model.save('health_monitor_final.keras')
 print("\nModel saved to health_monitor_final.keras")
 
+model.save('fault_detector_model.h5')
+print("Model also saved to fault_detector_model.h5 (HDF5 format for dashboard)")
+
 # Reload (proves the save worked)
 loaded_model = keras.models.load_model('health_monitor_final.keras')
 
