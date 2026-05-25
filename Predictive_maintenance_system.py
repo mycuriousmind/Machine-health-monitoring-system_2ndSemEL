@@ -1,6 +1,6 @@
 # ================================================================
 # MACHINE HEALTH MONITORING — Full Pipeline
-# PyTorch  : 1D-CNN on CWRU vibration windows
+# PyTorch : 1D-CNN on CWRU vibration windows
 # Sklearn   : Random Forest + SVM on AI4I 2020 tabular data
 # ================================================================
 
@@ -51,8 +51,8 @@ print("="*60)
 
 from ucimlrepo import fetch_ucirepo
 
-ai4i = fetch_ucirepo(id=601)
-df   = pd.concat([ai4i.data.features, ai4i.data.targets], axis=1)
+ai4i = pd.read_csv('ai4i2020.csv')
+df   = ai4i.copy()
 
 # Flatten column names
 df.columns = (df.columns.str.strip()
@@ -60,7 +60,9 @@ df.columns = (df.columns.str.strip()
                          .str.replace(r'[\[\]\s/]+', '_', regex=True)
                          .str.replace(r'[^\w]', '', regex=True))
 print("Columns:", list(df.columns))
-
+print("Raw columns:", list(df.columns))
+print("Transformed columns:", list(df.columns))
+#Transformed columns: ['udi', 'product_id', 'type', 'air_temperature_k_', 'process_temperature_k_', 'rotational_speed_rpm_', 'torque_nm_', 'tool_wear_min_', 'machine_failure', 'twf', 'hdf', 'pwf', 'osf', 'rnf']
 
 # ================================================================
 # A2 — FEATURE ENGINEERING
@@ -81,18 +83,15 @@ print("Columns:", list(df.columns))
 #                  High ratio = motor straining to maintain speed
 # ================================================================
 
-df['temp_delta']   = df['process_temperature_k'] - df['air_temperature_k']
-df['power']        = df['rotational_speed_rpm']  * df['torque_nm']
-df['wear_load']    = df['tool_wear_min']          * df['torque_nm']
-df['rpm_stability']= df['torque_nm'] / (df['rotational_speed_rpm'] + 1e-6)
+df['temp_delta']   = df['process_temperature_k_'] - df['air_temperature_k_']
+df['wear_load']    = df['tool_wear_min_']          * df['torque_nm_']
 
 if 'type' in df.columns:
     df['quality'] = LabelEncoder().fit_transform(df['type'])
 
 FEATURES = [
-    'air_temperature_k', 'process_temperature_k',
-    'rotational_speed_rpm', 'torque_nm', 'tool_wear_min',
-    'temp_delta', 'power', 'wear_load', 'rpm_stability',
+    'air_temperature_k_', 'process_temperature_k_', 'torque_nm_', 'tool_wear_min_',
+    'temp_delta', 'wear_load'
 ]
 if 'quality' in df.columns:
     FEATURES.append('quality')
@@ -159,42 +158,6 @@ print(classification_report(y_te, y_pred_rf,
 fi = pd.Series(rf.feature_importances_, index=FEATURES).sort_values(ascending=False)
 print("  Top features:")
 print(fi.to_string())
-
-
-# ================================================================
-# A5 — SVM  (RBF kernel)
-#
-# Key choices:
-#   StandardScaler : SVM uses Euclidean distances → scale is critical
-#                    RF does not need scaling (tree splits are ordinal)
-#   C=10           : low regularisation → complex boundary → suits
-#                    the non-linear fault regions in AI4I
-#   gamma='scale'  : 1/(n_features × X.var()) — safe automatic choice
-#   probability=True: activates Platt scaling so predict_proba() works
-#                     Adds slight overhead but needed for AUC + fusion
-# ================================================================
-
-print("\n── SVM (RBF) ──────────────────────────────────")
-
-svm_pipe = Pipeline([
-    ('scaler', StandardScaler()),
-    ('svm',    SVC(kernel='rbf', C=10.0, gamma='scale',
-                   class_weight='balanced',
-                   probability=True, random_state=SEED))
-])
-
-cv_auc_svm = cross_val_score(svm_pipe, X_tr, y_tr, cv=cv,
-                              scoring='roc_auc', n_jobs=-1)
-print(f"  5-Fold CV AUC : {cv_auc_svm.mean():.4f} ± {cv_auc_svm.std():.4f}")
-
-svm_pipe.fit(X_tr, y_tr)
-y_prob_svm = svm_pipe.predict_proba(X_te)[:, 1]
-y_pred_svm = (y_prob_svm >= 0.5).astype(int)
-auc_svm    = roc_auc_score(y_te, y_prob_svm)
-
-print(f"  Test AUC      : {auc_svm:.4f}")
-print(classification_report(y_te, y_pred_svm,
-                             target_names=['Healthy', 'Faulty']))
 
 
 # ================================================================
@@ -434,9 +397,11 @@ print(f"\nCNN parameter count: {sum(p.numel() for p in model_cnn.parameters()):,
 criterion = nn.BCELoss()
 optimizer = optim.Adam(model_cnn.parameters(), lr=1e-3)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-
-EPOCHS       = 50
+    optimizer, mode='min', factor=0.5, patience=5)
+old_lr = scheduler.optimizer.param_groups[0]['lr']
+if scheduler.optimizer.param_groups[0]['lr'] != old_lr:
+    print(f"Learning rate changed to: {scheduler.optimizer.param_groups[0]['lr']}")
+EPOCHS = 50
 best_val_loss= float('inf')
 patience_ctr = 0
 PATIENCE     = 10         # early stopping
@@ -531,7 +496,7 @@ fig.suptitle('Machine Health Monitoring — Model Comparison', fontsize=14)
 
 # ROC curves — tabular models
 ax = axes[0, 0]
-for name, y_prob in [("Random Forest", y_prob_rf), ("SVM", y_prob_svm)]:
+for name, y_prob in [("Random Forest", y_prob_rf)]:
     fpr, tpr, _ = roc_curve(y_te, y_prob)
     ax.plot(fpr, tpr, lw=2, label=f"{name} AUC={roc_auc_score(y_te,y_prob):.3f}")
 ax.plot([0,1],[0,1],'k--', alpha=0.3)
@@ -555,7 +520,6 @@ ax.legend(); ax.grid(alpha=0.3)
 for ax, (name, y_pred, y_true) in zip(
     axes[1], [
         ("Random Forest", y_pred_rf,  y_te),
-        ("SVM",           y_pred_svm, y_te),
         ("1D-CNN",        y_pred_cnn, y_true_cnn),
     ]):
     cm = confusion_matrix(y_true, y_pred)
@@ -571,6 +535,5 @@ plt.show()
 print("\n── Final Summary ──────────────────────────────")
 print(f"{'Model':<20} {'Dataset':<12} {'Test AUC':>10}  Input type")
 print("─" * 60)
-print(f"{'Random Forest':<20} {'AI4I 2020':<12} {auc_rf:>10.4f}  Tabular (temp, RPM, torque)")
-print(f"{'SVM (RBF)':<20} {'AI4I 2020':<12} {auc_svm:>10.4f}  Tabular (temp, RPM, torque)")
+print(f"{'Random Forest':<20} {'AI4I 2020':<12} {auc_rf:>10.4f}  Tabular (temp, torque)")
 print(f"{'1D-CNN (PyTorch)':<20} {'CWRU-style':<12} {auc_cnn:>10.4f}  Raw vibration waveform")
