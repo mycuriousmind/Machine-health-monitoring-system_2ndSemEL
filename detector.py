@@ -1,23 +1,23 @@
 import cv2
 import numpy as np
 
+import time
 import random
 import os
 import json
 
-# 0. Load ML Model for Fault Prediction
-try:
-    from tensorflow import keras
-    model_path = "fault_detector_model.keras"
-    if os.path.exists(model_path):
-        ml_model = keras.models.load_model(model_path)
-        print(f"ML Model loaded successfully from {model_path}")
-    else:
-        ml_model = None
-        print("ML Model file not found. Fault prediction will be disabled.")
-except ImportError:
-    ml_model = None
-    print("Tensorflow not found. Fault prediction will be disabled.")
+def get_shared_data():
+    if os.path.exists("shared_data.json"):
+        try:
+            with open("shared_data.json", "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+# 0. Load ML Models for Fault Prediction
+import model_utils
+cnn_model, rf_model, fusion_model, mu_vib, sd_vib = model_utils.load_all_models()
 
 # 1. Fault Trigger & Control GUI
 import tkinter as tk
@@ -84,7 +84,13 @@ def main():
     ]
 
     # Telemetry Data Cache (to prevent flickering values)
-    telemetry_cache = {lbl["name"]: 0 for lbl in labels}
+    telemetry_cache = {
+        "Temperature": 35.0,
+        "Vibration": 0.0,
+        "Signal": 100,
+        "Core Temp": 45.0,
+        "RPM": 3000
+    }
     vibration_buffer = np.zeros((100, 3), dtype=np.float32)
     health_status = "INITIALIZING"
     health_color = (255, 255, 255)
@@ -173,78 +179,94 @@ def main():
                 rx1, ry1, rx2, ry2 = current_M
                 cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (255, 255, 255), 2)
 
-                # 2. Stable Fixed HUD Telemetry (No moving labels)
-                hud_x_start = w_frame - 300 # Moved left to ensure symbols show
-                hud_y_start = 80
+                # --- CHECK ESP32 STATUS ---
+                shared_data = get_shared_data()
+                esp_data = shared_data.get("esp_data", {})
                 
-                for i, lbl in enumerate(labels):
-                    # Only update values every 10 frames to stop flickering data
-                    if frame_count % 10 == 0:
-                        is_faulty = fault_triggers.get(lbl["name"], False)
+                if time.time() - esp_data.get("Timestamp", 0) > 5:
+                    # Disconnected
+                    cv2.putText(display_frame, "CONNECT ESP32", (w_frame//2 - 180, 100), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+                    
+                    hud_x_start = w_frame - 300
+                    hud_y_start = 80
+                    for i, lbl in enumerate(labels):
+                        tx, ty = hud_x_start, hud_y_start + (i * 45)
+                        cv2.putText(display_frame, f"{lbl['name']}: ---", (tx, ty), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2)
                         
-                        if "Signal" in lbl["name"]:
-                            telemetry_cache[lbl["name"]] = random.randint(10, 30) if is_faulty else random.randint(85, 100)
+                else:
+                    # Real ESP32 Data
+                    real_temp = esp_data.get("Temperature", 35.0)
+                    real_current = esp_data.get("Current", 0.0)
+                    mapped_torque = real_current * 20.0
+                    mapped_rpm = max(0, 3000.0 - (real_current * 100.0))
+                    is_esp_faulty = real_temp > 45.0 or real_current > 3.0
+                    
+                    hud_x_start = w_frame - 300
+                    hud_y_start = 80
+                    
+                    for i, lbl in enumerate(labels):
+                        # Map ESP data to telemetry cache
+                        if "Temperature" in lbl["name"]:
+                            telemetry_cache[lbl["name"]] = real_temp
                         elif "RPM" in lbl["name"]:
-                            telemetry_cache[lbl["name"]] = random.randint(7000, 9000) if is_faulty else random.randint(2800, 3200)
+                            telemetry_cache[lbl["name"]] = mapped_rpm
+                        elif "Signal" in lbl["name"]:
+                            telemetry_cache[lbl["name"]] = 100
                         elif "Vibration" in lbl["name"]:
-                            if is_faulty:
-                                axis_vibs = [random.uniform(5.0, 10.0) for _ in range(3)]
+                            t = np.linspace(0, 100 / 12000, 100)
+                            if is_esp_faulty:
+                                f0 = 30.0 
+                                bpfi = f0 * 5.4
+                                sig = 1.0 * np.sin(2*np.pi*f0*t) + 0.4 * np.sin(2*np.pi*bpfi*t) + 0.2 * np.sin(2*np.pi*2*bpfi*t)
+                                for pos in [20, 60]:
+                                    sig += 2.0 * np.exp(-200*(np.arange(100)-pos)**2/100)
+                                vibration_buffer = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.2
                             else:
-                                axis_vibs = [random.uniform(-1.5, 1.5) for _ in range(3)]
+                                sig = 0.3 * np.sin(2*np.pi*30.0*t)
+                                vibration_buffer = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.05
+                                
+                            telemetry_cache[lbl["name"]] = float(np.sqrt(np.mean(vibration_buffer**2)))
                             
-                            telemetry_cache[lbl["name"]] = sum(axis_vibs) / 3.0
-                            vibration_buffer = np.roll(vibration_buffer, -1, axis=0)
-                            vibration_buffer[-1] = axis_vibs
+                            # Real-time Inference using mapped ESP data
+                            cnn_prob = model_utils.predict_vibration(cnn_model, vibration_buffer, mu_vib, sd_vib)
+                            rf_prob = model_utils.predict_tabular(rf_model, 
+                                                                  temperature=real_temp,
+                                                                  rpm=mapped_rpm,
+                                                                  torque=mapped_torque,
+                                                                  tool_wear=100.0)
                             
-                            if ml_model is not None:
-                                x_input = vibration_buffer[np.newaxis, ...]
-                                prob = ml_model.predict(x_input, verbose=0)[0][0]
-                                if prob > 0.5:
-                                    health_status = "FAULTY"
-                                    health_color = (0, 0, 255)
-                                else:
-                                    health_status = "HEALTHY"
-                                    health_color = (0, 255, 0)
-                        else: # Temperatures
-                            telemetry_cache[lbl["name"]] = random.uniform(85.0, 110.0) if is_faulty else random.uniform(34.0, 37.0)
-
-
-                    
-                    # Flashing Effect if Faulty
-                    is_faulty = fault_triggers.get(lbl["name"], False)
-                    show_item = True
-                    if is_faulty and (frame_count // 5) % 2 == 0:
-                        show_item = False
-                    
-                    if show_item:
-                        val = telemetry_cache[lbl["name"]]
+                            health_res = model_utils.get_combined_health(cnn_prob, rf_prob, fusion_model)
+                            health_status = health_res["status"]
+                            prob = health_res["fused_prob"]
+                            
+                            health_color = (0, 0, 255) if health_status == "FAULTY" else (0, 255, 0)
+                            
+                        # Draw label
+                        val = telemetry_cache.get(lbl["name"], 0)
                         val_str = f"{val:.1f}" if isinstance(val, float) else str(val)
                         full_label = f"{lbl['name']}: {val_str}{lbl['unit']}"
                         
-                        color = (0, 0, 255) if is_faulty else lbl["color"]
-                        
-                        # Fixed HUD Position
                         tx, ty = hud_x_start, hud_y_start + (i * 45)
+                        color = (0, 0, 255) if is_esp_faulty else lbl["color"]
                         
                         (tw, th), _ = cv2.getTextSize(full_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                         bg_x1, bg_y1 = tx, ty - th - 10
                         bg_x2, bg_y2 = tx + tw + 20, ty + 5
                         
-                        # Add Alert Symbol if Faulty
-                        if is_faulty:
-                            # Draw Warning Triangle
+                        # Add Warning Triangle if ESP says faulty
+                        if is_esp_faulty:
                             tri_pts = np.array([
-                                [tx - 35, ty + 5], # Bottom left
-                                [tx - 5, ty + 5],  # Bottom right
-                                [tx - 20, ty - 25] # Top middle
+                                [tx - 35, ty + 5],
+                                [tx - 5, ty + 5],
+                                [tx - 20, ty - 25]
                             ], np.int32)
                             cv2.drawContours(display_frame, [tri_pts], 0, (0, 0, 255), -1)
-                            cv2.putText(display_frame, "!", (tx - 24, ty - 2), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                         
                         cv2.rectangle(display_frame, (bg_x1, bg_y1), (bg_x2, bg_y2), (20, 20, 20), -1)
                         cv2.rectangle(display_frame, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
-                        cv2.putText(display_frame, full_label, (tx + 10, ty - 5),
+                        cv2.putText(display_frame, full_label, (tx + 10, ty), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
 
@@ -255,7 +277,12 @@ def main():
                         shared_payload = {
                             "telemetry": telemetry_cache,
                             "fault_triggers": fault_triggers,
-                            "health": {"status": health_status, "prob": float(prob) if 'prob' in locals() else 0.0}
+                            "health": {
+                                "status": health_status, 
+                                "fused_prob": health_res["fused_prob"] if 'health_res' in locals() else 0.0,
+                                "cnn_prob": health_res["cnn_prob"] if 'health_res' in locals() else 0.0,
+                                "rf_prob": health_res["rf_prob"] if 'health_res' in locals() else 0.0
+                            }
                         }
                         with open("shared_data.json", "w") as f:
                             json.dump(shared_payload, f)
@@ -272,11 +299,15 @@ def main():
                         pass
 
                 # 3. Machine Health Status Dashboard (Fixed Position)
-                hud_x, hud_y = 20, h_frame - 60
-                cv2.rectangle(display_frame, (hud_x, hud_y), (hud_x + 200, hud_y + 40), (20, 20, 20), -1)
-                cv2.rectangle(display_frame, (hud_x, hud_y), (hud_x + 200, hud_y + 40), health_color, 2)
-                cv2.putText(display_frame, f"HEALTH: {health_status}", (hud_x + 10, hud_y + 28),
+                hud_x, hud_y = 20, h_frame - 80
+                cv2.rectangle(display_frame, (hud_x, hud_y), (hud_x + 250, hud_y + 60), (20, 20, 20), -1)
+                cv2.rectangle(display_frame, (hud_x, hud_y), (hud_x + 250, hud_y + 60), health_color, 2)
+                cv2.putText(display_frame, f"HEALTH: {health_status}", (hud_x + 10, hud_y + 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, health_color, 2)
+                if 'health_res' in locals():
+                    probs_str = f"CNN: {health_res['cnn_prob']:.2f} | RF: {health_res['rf_prob']:.2f}"
+                    cv2.putText(display_frame, probs_str, (hud_x + 10, hud_y + 45),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
             cv2.putText(display_frame, "STABLE HUD ACTIVE - 'R' TO RESET", (20, 40), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)

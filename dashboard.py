@@ -1,12 +1,6 @@
-# ================================================================
-# dashboard.py — FIXED VERSION
-# Machine Health AI Dashboard | Streamlit + Plotly + 1D-CNN
-# ================================================================
-
 import streamlit as st
 import numpy as np
-import tensorflow as tf
-import keras
+import model_utils
 import plotly.graph_objects as go
 import time
 import os
@@ -14,228 +8,300 @@ import json
 import subprocess
 import random
 import sys
-import tempfile
 
-# ── Page Config ─────────────────────────────────────────────
+# -- Set Page Config -----------------------------------------
 st.set_page_config(
     page_title="Machine Health Monitor AI",
     page_icon="🤖",
     layout="wide",
 )
 
-# ── Normalisation constants ──────────────────────────────────
-# ⚠️  Replace these with your actual training stats from Block 2
-# of the training script (train_mean and train_std).
-TRAIN_MEAN = 0.0
-TRAIN_STD  = 1.0
-
-# ── Load ML Model ────────────────────────────────────────────
+# -- Load ML Models ------------------------------------------
 @st.cache_resource
-def load_ml_model():
-    model_path = "fault_detector_model.h5"
-    if os.path.exists(model_path):
-        return keras.models.load_model(model_path)
+def load_all_models_cached():
+    return model_utils.load_all_models()
+
+cnn_model, rf_model, fusion_model, mu_vib, sd_vib = load_all_models_cached()
+
+# -- Shared Data Helper --------------------------------------
+def get_shared_data():
+    if os.path.exists("shared_data.json"):
+        try:
+            with open("shared_data.json", "r") as f:
+                return json.load(f)
+        except:
+            return None
     return None
 
-model = load_ml_model()
-
-# ── JSON Helpers (race-condition safe) ───────────────────────
-def get_shared_data() -> dict:
+def save_dashboard_fault_triggers(current_triggers):
     try:
-        with open("shared_data.json", "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        shared = get_shared_data() or {}
+        shared["dashboard_faults"] = current_triggers
+        with open("shared_data.json", "w") as f:
+            json.dump(shared, f)
+    except:
+        pass
 
-def write_json_safe(path: str, data: dict):
-    """Atomic write: temp file → os.replace (never leaves partial JSON)."""
-    dir_ = os.path.dirname(os.path.abspath(path))
-    with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False, suffix=".tmp") as f:
-        json.dump(data, f, indent=2)
-        tmp_path = f.name
-    os.replace(tmp_path, path)
-
-def save_dashboard_fault_triggers(triggers: dict):
-    shared = get_shared_data()
-    shared["dashboard_faults"] = triggers
-    write_json_safe("shared_data.json", shared)
-
-# ── Custom CSS ───────────────────────────────────────────────
+# -- Custom CSS for Premium Look -----------------------------
 st.markdown("""
-<style>
-.main { background-color: #0f1116; }
-.stMetric {
-    background-color: #1e222d;
-    padding: 20px;
-    border-radius: 10px;
-    border: 1px solid #30363d;
-}
-.status-card {
-    padding: 30px; border-radius: 15px;
-    text-align: center; font-size: 24px;
-    font-weight: bold; margin-bottom: 20px;
-}
-.healthy { background-color: rgba(0,255,0,0.1); border: 2px solid #00ff00; color: #00ff00; }
-.faulty  { background-color: rgba(255,0,0,0.1); border: 2px solid #ff0000; color: #ff0000; }
-</style>
-""", unsafe_allow_html=True)
+    <style>
+    .main {
+        background-color: #0f1116;
+    }
+    .stMetric {
+        background-color: #1e222d;
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #30363d;
+    }
+    .status-card {
+        padding: 30px;
+        border-radius: 15px;
+        text-align: center;
+        font-size: 24px;
+        font-weight: bold;
+        margin-bottom: 20px;
+    }
+    .healthy {
+        background-color: rgba(0, 255, 0, 0.1);
+        border: 2px solid #00ff00;
+        color: #00ff00;
+    }
+    .faulty {
+        background-color: rgba(255, 0, 0, 0.1);
+        border: 2px solid #ff0000;
+        color: #ff0000;
+    }
+    .ar-button {
+        display: inline-block;
+        padding: 0.5em 1em;
+        background-color: #4CAF50;
+        color: white;
+        text-align: center;
+        text-decoration: none;
+        font-size: 16px;
+        border-radius: 8px;
+        margin: 10px 0px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-# ── Title ────────────────────────────────────────────────────
+# -- Title and Header ----------------------------------------
 st.title("🛡️ Machine Health AI Dashboard")
 st.markdown("### Real-time Vibration Analysis & Fault Prediction")
 
-# ── AR Detector Button (with process guard) ──────────────────
-if "ar_process" not in st.session_state:
-    st.session_state.ar_process = None
-
-col_h1, col_h2 = st.columns([3, 1])
-with col_h2:
-    ar_alive = (
-        st.session_state.ar_process is not None
-        and st.session_state.ar_process.poll() is None
-    )
-    if ar_alive:
-        if st.button("🛑 STOP AR DETECTOR", use_container_width=True):
-            st.session_state.ar_process.terminate()
-            st.session_state.ar_process = None
-            st.rerun()
-    else:
-        if st.button("🚀 LAUNCH AR DETECTOR", use_container_width=True):
-            st.session_state.ar_process = subprocess.Popen(
-                [sys.executable, "detector.py"]
-            )
-            st.success("AR Detector launched!")
+# -- AR Control Button ---------------------------------------
+col_header1, col_header2 = st.columns([3, 1])
+with col_header2:
+    if st.button("🚀 LAUNCH AR DETECTOR", use_container_width=True):
+        subprocess.Popen([sys.executable, "detector.py"])
+        st.success("AR Detector launched!")
 
 st.divider()
 
-if model is None:
-    st.error("❌ Model file 'fault_detector_model.keras' not found. Train the model first.")
-    st.stop()
+if cnn_model is None or rf_model is None:
+    st.warning("⚠️ Some models could not be loaded. Please run `Predictive_maintenance_system.py` to train and save the PyTorch and RF models.")
 
-# ── Sidebar ──────────────────────────────────────────────────
+# -- Sidebar Controls ----------------------------------------
 with st.sidebar:
     st.header("Control Panel")
-    sim_mode  = st.radio("Data Source", ["Simulation", "Live from AR Detector"])
-    sim_speed = st.slider("Update interval (ms)", 100, 1000, 500)
+    sim_mode = st.radio("Data Source", ["Simulation", "Live from ESP32 Sensors"])
+    sim_speed = st.slider("Simulation Speed (ms)", 100, 1000, 500)
+    
     st.markdown("---")
     st.subheader("Manual Fault Injection")
     force_temp = st.checkbox("Force Temperature Fault")
-    force_vib  = st.checkbox("Force Vibration Fault")
-    force_rpm  = st.checkbox("Force RPM Fault")
-    st.info("Uses your trained 1D-CNN to analyse vibration patterns.")
-
-save_dashboard_fault_triggers({
-    "Temperature": force_temp,
-    "Vibration":   force_vib,
-    "RPM":         force_rpm,
-    "Core Temp":   force_temp,
-    "Signal":      False,
-})
-
-# ── Session State Init ───────────────────────────────────────
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "last_update" not in st.session_state:
-    st.session_state.last_update = 0.0
-
-# ── Non-blocking rate limiter ────────────────────────────────
-# If not enough time has passed since last update, just rerun
-# immediately — keeps Streamlit responsive without blocking.
-now = time.time()
-if now - st.session_state.last_update < (sim_speed / 1000):
-    time.sleep(0.05)   # tiny sleep to avoid 100% CPU spin
-    st.rerun()
-st.session_state.last_update = now
-
-# ── Gather Data ──────────────────────────────────────────────
-shared_data = get_shared_data()
-
-if sim_mode == "Live from AR Detector" and shared_data.get("health"):
-    telemetry = shared_data.get("telemetry", {})
-    prob      = shared_data["health"].get("prob", 0.0)
-    is_faulty = shared_data["health"].get("status", "") == "FAULTY"
-    v_base    = telemetry.get("Vibration", 0.0)
-    raw_data  = (np.random.randn(100, 3).astype(np.float32)
-                 * (5.0 if is_faulty else 1.2) + v_base)
-else:
-    # Simulation mode
-    scale    = 5.0 if force_vib else 1.2
-    raw_data = np.random.randn(100, 3).astype(np.float32) * scale
-
-    # ✅ FIX: normalise before inference
-    raw_data_norm = (raw_data - TRAIN_MEAN) / (TRAIN_STD + 1e-8)
-    x_input       = raw_data_norm[np.newaxis, ...]
-    prob          = float(model.predict(x_input, verbose=0)[0, 0])
-    is_faulty     = prob > 0.5
-    telemetry     = {
-        "Temperature": 95.0 if force_temp else random.uniform(34.0, 37.0),
-        "Vibration":   float(np.sqrt(np.mean(raw_data ** 2))),
-        "RPM":         8500  if force_rpm  else random.randint(2800, 3200),
-        "Signal":      95,
+    force_vib = st.checkbox("Force Vibration Fault")
+    force_rpm = st.checkbox("Force RPM Fault")
+    
+    # Sync faults with dashboard
+    dashboard_faults = {
+        "Temperature": force_temp,
+        "Vibration": force_vib,
+        "RPM": force_rpm,
+        "Core Temp": force_temp,
+        "Signal": False
     }
-    # Write simulation telemetry so AR HUD stays in sync
-    shared = get_shared_data()
-    shared["telemetry"] = telemetry
-    shared["health"]    = {"prob": round(prob, 4),
-                           "status": "FAULTY" if is_faulty else "HEALTHY"}
-    write_json_safe("shared_data.json", shared)
+    save_dashboard_fault_triggers(dashboard_faults)
+    
+    st.info("This dashboard fuses a PyTorch 1D-CNN (vibration) and a Scikit-Learn Random Forest (telemetry).")
+    
+    st.markdown("---")
+    st.subheader("Model Status")
+    st.write(f"🧠 PyTorch CNN: {'✅ Loaded' if cnn_model else '❌ Missing'}")
+    st.write(f"🌳 Random Forest: {'✅ Loaded' if rf_model else '❌ Missing'}")
 
-# ── History ──────────────────────────────────────────────────
-st.session_state.history.append(prob)
-if len(st.session_state.history) > 50:
-    st.session_state.history.pop(0)
+# -- Main Execution Loop -------------------------------------
+placeholder = st.empty()
 
-# ── Render UI ────────────────────────────────────────────────
-status_class = "faulty" if is_faulty else "healthy"
-status_text  = "⚠️ ALERT: FAULT DETECTED" if is_faulty else "✅ SYSTEM HEALTHY"
-st.markdown(f'<div class="status-card {status_class}">{status_text}</div>',
-            unsafe_allow_html=True)
+if 'history' not in st.session_state:
+    st.session_state.history = []
 
-m1, m2, m3 = st.columns(3)
-m1.metric("Fault Probability", f"{prob*100:.1f}%")
-m2.metric("Vibration RMS",     f"{telemetry.get('Vibration', 0.0):.2f} g")
-m3.metric("Temperature",       f"{telemetry.get('Temperature', 0.0):.1f} °C")
+while True:
+    shared_data = get_shared_data()
+    
+    esp_disconnected = False
+    
+    # 1. Gather Data based on mode
+    if sim_mode == "Live from ESP32 Sensors":
+        esp_data = shared_data.get("esp_data", {})
+        esp_disconnected = (time.time() - esp_data.get("Timestamp", 0) > 5)
+        
+        if esp_disconnected:
+            is_faulty = False
+            prob = 0.0
+            telemetry = {"Temperature": 0.0, "Vibration": 0.0, "RPM": 0.0, "Signal": 0}
+            cnn_prob = 0.0
+            rf_prob = 0.0
+            raw_data = np.zeros((100, 3))
+        else:
+            # Real ESP32 Data
+            real_temp = esp_data.get("Temperature", 35.0)
+            real_current = esp_data.get("Current", 0.0)
+            
+            # Physical Mappings: Current translates to Mechanical Load (Torque)
+            mapped_torque = real_current * 20.0
+            mapped_rpm = max(0, 3000.0 - (real_current * 100.0))
+            
+            # We synthesize vibration based on real mechanical state since ESP doesn't have an accelerometer yet
+            is_esp_faulty = real_temp > 45.0 or real_current > 3.0
+            
+            t = np.linspace(0, 100 / 12000, 100)
+            if is_esp_faulty:
+                f0 = 30.0 
+                bpfi = f0 * 5.4
+                sig = 1.0 * np.sin(2*np.pi*f0*t) + 0.4 * np.sin(2*np.pi*bpfi*t) + 0.2 * np.sin(2*np.pi*2*bpfi*t)
+                for pos in [20, 60]:
+                    sig += 2.0 * np.exp(-200*(np.arange(100)-pos)**2/100)
+                raw_data = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.2
+            else:
+                sig = 0.3 * np.sin(2*np.pi*30.0*t)
+                raw_data = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.05
+                
+            # Inference using real mapped data
+            cnn_prob = model_utils.predict_vibration(cnn_model, raw_data, mu_vib, sd_vib)
+            rf_prob = model_utils.predict_tabular(rf_model, 
+                                                  temperature=real_temp,
+                                                  rpm=mapped_rpm,
+                                                  torque=mapped_torque,
+                                                  tool_wear=100.0) # Assume base wear for now
+                                                  
+            health_res = model_utils.get_combined_health(cnn_prob, rf_prob, fusion_model)
+            is_faulty = health_res["status"] == "FAULTY"
+            prob = health_res["fused_prob"]
+            
+            telemetry = {
+                "Temperature": real_temp,
+                "Vibration": np.sqrt(np.mean(raw_data**2)),
+                "RPM": mapped_rpm,
+                "Signal": 100
+            }
+        
+    else:
+        # Simulation Mode
+        t = np.linspace(0, 100 / 12000, 100)
+        if force_vib:
+            # Generate a faulty signal (sine + harmonics + impacts) similar to training
+            f0 = 30.0 
+            bpfi = f0 * 5.4
+            sig = 1.0 * np.sin(2*np.pi*f0*t) + 0.4 * np.sin(2*np.pi*bpfi*t) + 0.2 * np.sin(2*np.pi*2*bpfi*t)
+            for pos in [20, 60]:
+                sig += 2.0 * np.exp(-200*(np.arange(100)-pos)**2/100)
+            raw_data = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.2
+        else:
+            # Healthy signal (just small sine wave + noise)
+            sig = 0.3 * np.sin(2*np.pi*30.0*t)
+            raw_data = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.05
+        
+        # Run local prediction for CNN
+        cnn_prob = model_utils.predict_vibration(cnn_model, raw_data, mu_vib, sd_vib)
+        
+        telemetry = {
+            "Temperature": 95.0 if force_temp else random.uniform(34.0, 37.0),
+            "Vibration": np.sqrt(np.mean(raw_data**2)),
+            "RPM": 8500 if force_rpm else random.randint(2800, 3200),
+            "Signal": 95
+        }
+        
+        # RF relies on Temperature, Torque, Tool wear. 
+        # Increase torque/tool_wear if faults are forced to ensure a high probability prediction.
+        is_rf_faulty = force_temp or force_rpm
+        
+        # Run local prediction for RF
+        rf_prob = model_utils.predict_tabular(rf_model, 
+                                              temperature=telemetry["Temperature"],
+                                              rpm=telemetry["RPM"],
+                                              torque=80.0 if is_rf_faulty else 40.0,
+                                              tool_wear=220.0 if is_rf_faulty else 100.0)
+                                              
+        health_res = model_utils.get_combined_health(cnn_prob, rf_prob, fusion_model)
+        is_faulty = health_res["status"] == "FAULTY"
+        prob = health_res["fused_prob"]
+        
+        # Save simulated telemetry so AR HUD matches exactly
+        try:
+            shared = get_shared_data() or {}
+            shared["telemetry"] = telemetry
+            shared["health"] = {
+                "status": health_res["status"],
+                "fused_prob": prob,
+                "cnn_prob": cnn_prob,
+                "rf_prob": rf_prob
+            }
+            with open("shared_data.json", "w") as f:
+                json.dump(shared, f)
+        except: pass
+        
+        import random # need for local sim
 
-c1, c2 = st.columns([2, 1])
-with c1:
-    fig_wave = go.Figure()
-    for axis, color in zip(range(3), ['#007bff', '#28a745', '#dc3545']):
-        fig_wave.add_trace(go.Scatter(
-            y=raw_data[:, axis], name=f"Axis {axis}",
-            line=dict(color=color, width=1)
-        ))
-    fig_wave.update_layout(title="Real-time Vibration (X, Y, Z)",
-                           template="plotly_dark", height=300,
-                           margin=dict(l=20, r=20, t=40, b=20))
-    st.plotly_chart(fig_wave, use_container_width=True, key="vibration_chart")
+    # 3. Update History
+    st.session_state.history.append(prob)
+    if len(st.session_state.history) > 50:
+        st.session_state.history.pop(0)
 
-with c2:
-    fig_gauge = go.Figure(go.Indicator(
-        mode  = "gauge+number",
-        value = prob * 100,
-        gauge = {
-            'bar':   {'color': "#ff0000" if is_faulty else "#00ff00"},
-            'steps': [{'range': [0,  50], 'color': '#003300'},
-                      {'range': [50, 100], 'color': '#330000'}],
-        },
-        title = {'text': "AI Confidence", 'font': {'size': 18}}
-    ))
-    fig_gauge.update_layout(template="plotly_dark", height=300,
-                            margin=dict(l=30, r=30, t=50, b=20))
-    st.plotly_chart(fig_gauge, use_container_width=True, key="gauge_chart")
+    # 4. Render Interface
+    with placeholder.container():
+        if esp_disconnected:
+            st.markdown("<br><br><br><h1 style='text-align: center; color: red;'>⚠️ ESP32 DISCONNECTED!</h1><h2 style='text-align: center;'>PLEASE CONNECT ESP32</h2>", unsafe_allow_html=True)
+            time.sleep(sim_speed / 1000)
+            continue
 
-fig_hist = go.Figure()
-fig_hist.add_trace(go.Scatter(
-    y=st.session_state.history, fill='tozeroy',
-    line=dict(color='#ff0000' if is_faulty else '#00ff00')
-))
-fig_hist.update_layout(title="Fault Probability History",
-                       template="plotly_dark", height=150,
-                       margin=dict(l=20, r=20, t=40, b=20),
-                       yaxis=dict(range=[0, 1]))
-st.plotly_chart(fig_hist, use_container_width=True, key="history_chart")
+        # Status Card
+        status_class = "faulty" if is_faulty else "healthy"
+        status_text = "⚠️ ALERT: FAULT DETECTED" if is_faulty else "✅ SYSTEM HEALTHY"
+        st.markdown(f'<div class="status-card {status_class}">{status_text}</div>', unsafe_allow_html=True)
+        
+        # Metrics Row
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Combined AI Confidence", f"{prob*100:.1f}%", delta=None)
+        m2.metric("CNN (Vibration)", f"{cnn_prob*100:.1f}%", delta=None)
+        m3.metric("RF (Telemetry)", f"{rf_prob*100:.1f}%", delta=None)
+        m4.metric("Temperature", f"{telemetry.get('Temperature', 0.0):.1f} °C", delta=None)
 
-# ── Trigger next cycle ───────────────────────────────────────
-# This replaces the while True loop entirely.
-# Streamlit re-runs the whole script from top, keeping the UI live.
-st.rerun()
+        # Charts Row
+        c1, c2 = st.columns([2, 1])
+        
+        with c1:
+            fig_wave = go.Figure()
+            for axis, color in zip(range(3), ['#007bff', '#28a745', '#dc3545']):
+                fig_wave.add_trace(go.Scatter(y=raw_data[:, axis], name=f"Axis {axis}", line=dict(color=color, width=1)))
+            fig_wave.update_layout(title="Real-time Vibration (X, Y, Z)", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(fig_wave, use_container_width=True)
+
+        with c2:
+            fig_gauge = go.Figure(go.Indicator(
+                mode = "gauge+number", value = prob * 100,
+                gauge = {'bar': {'color': "#ff0000" if is_faulty else "#00ff00"}, 'steps': [{'range': [0, 50], 'color': '#003300'}, {'range': [50, 100], 'color': '#330000'}]},
+                title = {'text': "AI Confidence", 'font': {'size': 18}}
+            ))
+            fig_gauge.update_layout(template="plotly_dark", height=300, margin=dict(l=30, r=30, t=50, b=20))
+            st.plotly_chart(fig_gauge, use_container_width=True)
+
+            # History Chart
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Scatter(y=st.session_state.history, fill='tozeroy', line=dict(color='#00ff00' if not is_faulty else '#ff0000')))
+            fig_hist.update_layout(title="Fault Probability History", template="plotly_dark", height=150, margin=dict(l=20, r=20, t=40, b=20), yaxis=dict(range=[0, 1]))
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+    time.sleep(sim_speed / 1000)
+

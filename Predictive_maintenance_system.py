@@ -900,3 +900,15 @@ print("─" * 62)
 print(f"{'Random Forest':<22} {'AI4I 2020':<12} {auc_rf:>8.4f}  Tabular (temp, torque, wear)")
 print(f"{'1D-CNN':<22} {'CWRU-style':<12} {auc_cnn:>8.4f}  Raw vibration waveform")
 print(f"{'Fused System':<22} {'Both':<12} {auc_fusion:>8.4f}  RF prob + CNN prob → LR")
+
+# --- NEW: Save Models for Real-time Inference ---
+import pickle
+print("\nSaving models for real-time inference...")
+with open('rf_model.pkl', 'wb') as f:
+    pickle.dump(rf, f)
+with open('fusion_lr.pkl', 'wb') as f:
+    pickle.dump(fusion_lr, f)
+np.save('vib_mu.npy', mu_vib)
+np.save('vib_sd.npy', sd_vib)
+print("✅ Models saved: best_cnn.pt, rf_model.pkl, fusion_lr.pkl, vib_mu.npy, vib_sd.npy")
+# ------------------------------------------------

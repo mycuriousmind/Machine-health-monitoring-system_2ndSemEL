@@ -1,1 +1,1 @@
-{"telemetry": {"Temperature": 35.55099706696007, "Vibration": -0.18009851247602993, "Signal": 89, "Core Temp": 34.27444873956245, "RPM": 3089}, "fault_triggers": {"Temperature": false, "Vibration": false, "Signal": false, "Core Temp": false, "RPM": false}, "health": {"status": "HEALTHY", "prob": 0.483566015958786}}
+{"telemetry": {"Temperature": 35.04988991028864, "Vibration": 

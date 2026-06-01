@@ -1,0 +1,53 @@
+#include <Wire.h>
+#include <Adafruit_MLX90614.h>
+
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+
+#define ACS712_PIN 34
+#define MOTOR_IN1  25
+#define MOTOR_IN2  26
+#define MOTOR_ENA  27
+
+// Thresholds
+#define TEMP_THRESHOLD    45.0
+#define CURRENT_THRESHOLD  3.0
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  mlx.begin();
+
+  pinMode(MOTOR_IN1, OUTPUT);
+  pinMode(MOTOR_IN2, OUTPUT);
+  pinMode(MOTOR_ENA, OUTPUT);
+
+  // Start motor
+  digitalWrite(MOTOR_IN1, HIGH);
+  digitalWrite(MOTOR_IN2, LOW);
+  analogWrite(MOTOR_ENA, 180); // Speed 0-255
+
+  Serial.println("System Started...");
+}
+
+void loop() {
+  // Read temperature
+  float temperature = mlx.getObjectTempC();
+
+  // Read current
+  int rawCurrent = analogRead(ACS712_PIN);
+  float voltage = (rawCurrent / 4095.0) * 3.3;
+  float current = (voltage - 2.5) / 0.185;
+
+  // Print to Serial Monitor
+  Serial.print("Temp: ");    Serial.print(temperature);
+  Serial.print("°C | Current: "); Serial.println(current);
+
+  // Fault detection logic
+  if (temperature > TEMP_THRESHOLD || current > CURRENT_THRESHOLD) {
+    Serial.println("FAULT DETECTED!");
+  } else {
+    Serial.println("Machine Healthy");
+  }
+
+  delay(1000);
+}
