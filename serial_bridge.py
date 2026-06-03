@@ -13,6 +13,26 @@ def get_shared_data():
             pass
     return {}
 
+def update_battery_charge(current_amp, now):
+    shared = get_shared_data()
+    total_capacity = 500.0  # 9V Alkaline battery average capacity in mAh
+    
+    if "battery_remaining_mah" not in shared:
+        shared["battery_remaining_mah"] = total_capacity
+        shared["last_charge_update_time"] = now
+        
+    last_time = shared.get("last_charge_update_time", now)
+    time_delta = now - last_time
+    
+    if 0 < time_delta < 60.0:
+        current_ma = abs(current_amp) * 1000.0
+        consumed_mah = (current_ma * time_delta) / 3600.0
+        shared["battery_remaining_mah"] = max(0.0, shared["battery_remaining_mah"] - consumed_mah)
+        
+    shared["last_charge_update_time"] = now
+    pct = (shared["battery_remaining_mah"] / total_capacity) * 100.0
+    return pct, shared
+
 def main():
     parser = argparse.ArgumentParser(description="Bridge between ESP32 and AI Dashboard")
     parser.add_argument("--port", type=str, default="COM3", help="Serial port (e.g. COM3 or /dev/ttyUSB0)")
@@ -49,11 +69,15 @@ def main():
                             temp = float(temp_str)
                             curr = float(curr_str)
                             
-                            shared = get_shared_data()
+                            # Estimate battery percentage based on live motor current
+                            now = time.time()
+                            bat_pct, shared = update_battery_charge(curr, now)
+                            
                             shared["esp_data"] = {
                                 "Temperature": temp,
                                 "Current": curr,
-                                "Timestamp": time.time()
+                                "Battery": bat_pct,
+                                "Timestamp": now
                             }
                             
                             with open("shared_data.json", "w") as f:
@@ -76,12 +100,16 @@ def main():
                                 vibration_buffer.pop(0)
                                 vibration_buffer.append([ax, ay, az])
                                 
-                                shared = get_shared_data()
+                                # Estimate battery percentage based on live motor current
+                                now = time.time()
+                                bat_pct, shared = update_battery_charge(curr, now)
+                                
                                 shared["esp_data"] = {
                                     "Temperature": temp,
                                     "Current": curr,
+                                    "Battery": bat_pct,
                                     "VibrationBuffer": list(vibration_buffer),
-                                    "Timestamp": time.time()
+                                    "Timestamp": now
                                 }
                                 
                                 with open("shared_data.json", "w") as f:

@@ -186,17 +186,8 @@ def main():
                 is_dashboard_active = (time.time() - dashboard_timestamp < 5.0)
                 
                 if not is_esp_active and not is_dashboard_active:
-                    # Disconnected
-                    cv2.putText(display_frame, "CONNECT ESP32", (w_frame//2 - 180, 100), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
-                    
-                    hud_x_start = w_frame - 300
-                    hud_y_start = 80
-                    for i, lbl in enumerate(labels):
-                        tx, ty = hud_x_start, hud_y_start + (i * 45)
-                        cv2.putText(display_frame, f"{lbl['name']}: ---", (tx, ty), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2)
-                        
+                    # (Values hidden until a machine is detected)
+                    pass
                 else:
                     # Determine active telemetry source
                     if is_esp_active:
@@ -270,36 +261,38 @@ def main():
                     for lbl in labels:
                         telemetry_cache[lbl["name"]] = telemetry_vals.get(lbl["name"], 0.0)
                         
-                    hud_x_start = w_frame - 300
-                    hud_y_start = 80
-                    for i, lbl in enumerate(labels):
-                        val = telemetry_cache.get(lbl["name"], 0)
-                        if "Current" in lbl["name"]:
-                            val_str = f"{val:.2f}"
-                        else:
-                            val_str = f"{val:.1f}" if isinstance(val, float) else str(val)
-                            
-                        full_label = f"{lbl['name']}: {val_str}{lbl['unit']}"
-                        tx, ty = hud_x_start, hud_y_start + (i * 45)
-                        color = (0, 0, 255) if is_esp_faulty else lbl["color"]
-                        
-                        (tw, th), _ = cv2.getTextSize(full_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                        bg_x1, bg_y1 = tx, ty - th - 10
-                        bg_x2, bg_y2 = tx + tw + 20, ty + 5
-                        
-                        # Add Warning Triangle if ESP says faulty
-                        if is_esp_faulty:
-                            tri_pts = np.array([
-                                [tx - 35, ty + 5],
-                                [tx - 5, ty + 5],
-                                [tx - 20, ty - 25]
-                            ], np.int32)
-                            cv2.drawContours(display_frame, [tri_pts], 0, (0, 0, 255), -1)
-                        
-                        cv2.rectangle(display_frame, (bg_x1, bg_y1), (bg_x2, bg_y2), (20, 20, 20), -1)
-                        cv2.rectangle(display_frame, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
-                        cv2.putText(display_frame, full_label, (tx + 10, ty), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        # Draw HUD only when a machine is detected
+        if is_detecting and current_M is not None:
+            hud_x_start = w_frame - 300
+            hud_y_start = 80
+            for i, lbl in enumerate(labels):
+                val = telemetry_cache.get(lbl["name"], 0)
+                if "Current" in lbl["name"]:
+                    val_str = f"{val:.2f}"
+                else:
+                    val_str = f"{val:.1f}" if isinstance(val, float) else str(val)
+                
+                full_label = f"{lbl['name']}: {val_str}{lbl['unit']}"
+                tx, ty = hud_x_start, hud_y_start + (i * 45)
+                color = (0, 0, 255) if is_esp_faulty else lbl["color"]
+                
+                (tw, th), _ = cv2.getTextSize(full_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                bg_x1, bg_y1 = tx, ty - th - 10
+                bg_x2, bg_y2 = tx + tw + 20, ty + 5
+                
+                # Add Warning Triangle if ESP says faulty
+                if is_esp_faulty:
+                    tri_pts = np.array([
+                        [tx - 35, ty + 5],
+                        [tx - 5, ty + 5],
+                        [tx - 20, ty - 25]
+                    ], np.int32)
+                    cv2.drawContours(display_frame, [tri_pts], 0, (0, 0, 255), -1)
+                
+                cv2.rectangle(display_frame, (bg_x1, bg_y1), (bg_x2, bg_y2), (20, 20, 20), -1)
+                cv2.rectangle(display_frame, (bg_x1, bg_y1), (bg_x2, bg_y2), color, 1)
+                cv2.putText(display_frame, full_label, (tx + 10, ty), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
                 # -- Dashboard Sync (Optimized: Outside loop) --
                 if frame_count % 10 == 0:

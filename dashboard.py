@@ -116,6 +116,11 @@ with st.sidebar:
     st.header("Control Panel")
     sim_mode = st.radio("Data Source", ["Live from ESP32 Sensors", "Simulation"])
     sim_speed = st.slider("Simulation Speed (ms)", 100, 1000, 500)
+    if sim_mode == "Simulation":
+        force_battery_dead = st.checkbox("Force Battery Depleted")
+    else:
+        force_battery_dead = False
+    # Battery will be calculated from current draw; no manual slider needed.
     
     st.markdown("---")
     st.subheader("Manual Fault Injection")
@@ -139,6 +144,23 @@ with st.sidebar:
     st.subheader("Model Status")
     st.write(f"🧠 PyTorch CNN: {'✅ Loaded' if cnn_model else '❌ Missing'}")
     st.write(f"🌳 Random Forest: {'✅ Loaded' if rf_model else '❌ Missing'}")
+    
+    st.markdown("---")
+    st.subheader("Battery Management")
+    if st.button("🔋 Reset/Replace Battery", use_container_width=True):
+        try:
+            shared = get_shared_data() or {}
+            shared["battery_remaining_mah"] = 500.0
+            shared["last_charge_update_time"] = time.time()
+            if "esp_data" in shared:
+                shared["esp_data"]["Battery"] = 100.0
+            with open("shared_data.json", "w") as f:
+                json.dump(shared, f)
+            st.success("Battery reset to 100%!")
+            time.sleep(1)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 # -- Main Execution Loop -------------------------------------
 if 'history' not in st.session_state:
@@ -156,7 +178,7 @@ if sim_mode == "Live from ESP32 Sensors":
     if esp_disconnected:
         is_faulty = False
         prob = 0.0
-        telemetry = {"Temperature": 0.0, "Vibration": 0.0, "RPM": 0.0, "Current": 0.0, "Signal": 0}
+        telemetry = {"Temperature": 0.0, "Vibration": 0.0, "RPM": 0.0, "Current": 0.0, "Signal": 0, "Battery": 0.0}
         cnn_prob = 0.0
         rf_prob = 0.0
         raw_data = np.zeros((100, 3))
@@ -164,12 +186,15 @@ if sim_mode == "Live from ESP32 Sensors":
         # Real ESP32 Data
         real_temp = esp_data.get("Temperature", 35.0)
         real_current = esp_data.get("Current", 0.0)
+        real_battery = esp_data.get("Battery", 100.0)
         
         # Handle NaN values safely
         if real_temp is None or (isinstance(real_temp, float) and np.isnan(real_temp)):
             real_temp = 35.0
         if real_current is None or (isinstance(real_current, float) and np.isnan(real_current)):
             real_current = 0.0
+        if real_battery is None or (isinstance(real_battery, float) and np.isnan(real_battery)):
+            real_battery = 100.0
             
         # Physical Mappings: Current translates to Mechanical Load (Torque)
         mapped_torque = real_current * 20.0
@@ -212,8 +237,15 @@ if sim_mode == "Live from ESP32 Sensors":
             "Vibration": np.sqrt(np.mean(raw_data**2)),
             "RPM": mapped_rpm,
             "Current": real_current,
-            "Signal": 100
+            "Signal": 100,
+            "Battery": real_battery
         }
+        # Determine if battery is dead (<=0%)
+        battery_dead = telemetry["Battery"] <= 0
+        # If battery is dead, treat motor as non-faulty
+        if battery_dead:
+            is_faulty = False
+        
         
         # Save telemetry and health to shared_data.json so AR HUD updates in real-time
         try:
@@ -224,7 +256,8 @@ if sim_mode == "Live from ESP32 Sensors":
                 "RPM": mapped_rpm,
                 "Signal": 100,
                 "Core Temp": real_temp,
-                "Current": real_current
+                "Current": real_current,
+                "Battery": real_battery
             }
             shared["health"] = {
                 "status": health_res["status"],
@@ -240,6 +273,11 @@ if sim_mode == "Live from ESP32 Sensors":
     
 else:
     # Simulation Mode
+    # Initialize battery state (mAh) and timestamp if not already present
+    if 'sim_battery_mah' not in st.session_state:
+        st.session_state.sim_battery_mah = 1000.0  # increased capacity to slow discharge
+        st.session_state.sim_battery_capacity = 1000.0  # store capacity for percent calc
+        st.session_state.last_battery_update = time.time()
     t = np.linspace(0, 100 / 12000, 100)
     if force_vib:
         # Generate a faulty signal (sine + harmonics + impacts) similar to training
@@ -258,30 +296,41 @@ else:
     cnn_prob = model_utils.predict_vibration(cnn_model, raw_data, mu_vib, sd_vib)
     
     sim_current = random.uniform(3.5, 4.8) if (force_temp or force_rpm) else random.uniform(1.2, 2.2)
+    # Update simulated battery based on current draw and elapsed time
+    now = time.time()
+    delta_h = (now - st.session_state.last_battery_update) / 3600  # hours elapsed since last update
+    decrement_mah = sim_current * delta_h * 1000  # A * h = Ah, convert to mAh
+    st.session_state.sim_battery_mah = max(0.0, st.session_state.sim_battery_mah - decrement_mah)
+    st.session_state.last_battery_update = now
+    capacity = getattr(st.session_state, 'sim_battery_capacity', 1000.0)
+    battery_percent = (st.session_state.sim_battery_mah / capacity) * 100
+    # If user forces battery depletion in simulation, set to 0
+    if force_battery_dead:
+        battery_percent = 0.0
+    
     telemetry = {
         "Temperature": 95.0 if force_temp else random.uniform(34.0, 37.0),
         "Vibration": np.sqrt(np.mean(raw_data**2)),
         "RPM": 8500 if force_rpm else random.randint(2800, 3200),
         "Current": sim_current,
         "Signal": 95,
-        "Core Temp": 95.0 if force_temp else random.uniform(34.0, 37.0)
+        "Core Temp": 95.0 if force_temp else random.uniform(34.0, 37.0),
+        "Battery": battery_percent
     }
     
-    # RF relies on Temperature, Torque, Tool wear. 
-    # Increase torque/tool_wear if faults are forced to ensure a high probability prediction.
-    is_rf_faulty = force_temp or force_rpm
-    
-    # Run local prediction for RF
-    rf_prob = model_utils.predict_tabular(rf_model, 
+    rf_prob = model_utils.predict_tabular(rf_model,
                                           temperature=telemetry["Temperature"],
                                           rpm=telemetry["RPM"],
-                                          torque=80.0 if is_rf_faulty else 40.0,
-                                          tool_wear=220.0 if is_rf_faulty else 100.0)
+                                          torque=80.0 if (force_temp or force_rpm) else 40.0,
+                                          tool_wear=220.0 if (force_temp or force_rpm) else 100.0)
                                           
     health_res = model_utils.get_combined_health(cnn_prob, rf_prob, fusion_model)
     is_faulty = health_res["status"] == "FAULTY"
     prob = health_res["fused_prob"]
-    
+    battery_dead = battery_percent <= 0
+    # If battery dead, treat motor as non-faulty
+    if battery_dead:
+        is_faulty = False    
     # Save simulated telemetry so AR HUD matches exactly
     try:
         shared = get_shared_data() or {}
@@ -310,7 +359,13 @@ if esp_disconnected:
 
 # Status Card
 status_class = "faulty" if is_faulty else "healthy"
-status_text = "⚠️ ALERT: FAULT DETECTED" if is_faulty else "✅ SYSTEM HEALTHY"
+# Override status if battery dead
+if battery_dead:
+    status_class = "faulty"
+    status_text = "🔋 BATTERY DEPLETED"
+else:
+    status_text = "⚠️ ALERT: FAULT DETECTED" if is_faulty else "✅ SYSTEM HEALTHY"
+
 st.markdown(f'<div class="status-card {status_class}">{status_text}</div>', unsafe_allow_html=True)
 
 # Metrics Row
@@ -319,7 +374,10 @@ m1.metric("Combined AI Confidence", f"{prob*100:.1f}%", delta=None)
 m2.metric("CNN (Vibration)", f"{cnn_prob*100:.1f}%", delta=None)
 m3.metric("RF (Telemetry)", f"{rf_prob*100:.1f}%", delta=None)
 m4.metric("Temperature", f"{telemetry.get('Temperature', 0.0):.1f} °C", delta=None)
-m5.metric("Current", f"{telemetry.get('Current', 0.0):.2f} A", delta=None)
+# Show zero current when battery depleted
+display_current = 0.0 if battery_dead else telemetry.get('Current', 0.0)
+m5.metric("Current", f"{display_current:.2f} A", delta=None)
+
 
 # Charts Row
 c1, c2 = st.columns([2, 1])
@@ -332,13 +390,32 @@ with c1:
     st.plotly_chart(fig_wave, use_container_width=True)
 
 with c2:
-    fig_gauge = go.Figure(go.Indicator(
-        mode = "gauge+number", value = prob * 100,
-        gauge = {'bar': {'color': "#ff0000" if is_faulty else "#00ff00"}, 'steps': [{'range': [0, 50], 'color': '#003300'}, {'range': [50, 100], 'color': '#330000'}]},
-        title = {'text': "AI Confidence", 'font': {'size': 18}}
-    ))
-    fig_gauge.update_layout(template="plotly_dark", height=300, margin=dict(l=30, r=30, t=50, b=20))
-    st.plotly_chart(fig_gauge, use_container_width=True)
+    cg1, cg2 = st.columns(2)
+    with cg1:
+        fig_gauge = go.Figure(go.Indicator(
+            mode = "gauge+number", value = prob * 100,
+            gauge = {'bar': {'color': "#ff0000" if is_faulty else "#00ff00"}, 'steps': [{'range': [0, 50], 'color': '#003300'}, {'range': [50, 100], 'color': '#330000'}]},
+            title = {'text': "AI Confidence", 'font': {'size': 16}}
+        ))
+        fig_gauge.update_layout(template="plotly_dark", height=200, margin=dict(l=30, r=30, t=50, b=20))
+        st.plotly_chart(fig_gauge, use_container_width=True)
+        
+    with cg2:
+        bat_val = telemetry.get("Battery", 100.0)
+        fig_battery = go.Figure(go.Indicator(
+            mode = "gauge+number", value = bat_val,
+            gauge = {
+                'axis': {'range': [0, 100]},
+                'bar': {'color': "#10b981" if bat_val > 20 else "#ef4444"},
+                'steps': [
+                    {'range': [0, 20], 'color': 'rgba(239, 68, 68, 0.2)'},
+                    {'range': [20, 100], 'color': 'rgba(16, 185, 129, 0.1)'}
+                ]
+            },
+            title = {'text': "Battery (%)", 'font': {'size': 16}}
+        ))
+        fig_battery.update_layout(template="plotly_dark", height=200, margin=dict(l=30, r=30, t=50, b=20))
+        st.plotly_chart(fig_battery, use_container_width=True)
 
     # History Chart
     fig_hist = go.Figure()

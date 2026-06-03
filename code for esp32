@@ -58,7 +58,6 @@ void loop() {
   float current = (voltage - 2.5) / 0.185;
 
   // Print to Serial Monitor with individual axes for CNN model
-  // Replace the Serial.print block with this:
   Serial.print(ax_normalized);
   Serial.print(",");
   Serial.print(ay_normalized);
