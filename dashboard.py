@@ -223,7 +223,7 @@ if sim_mode == "Live from ESP32 Sensors":
                 "Vibration": float(np.sqrt(np.mean(raw_data**2))),
                 "RPM": mapped_rpm,
                 "Signal": 100,
-                "Core Temp": real_temp + 10.0,
+                "Core Temp": real_temp,
                 "Current": real_current
             }
             shared["health"] = {
@@ -232,6 +232,7 @@ if sim_mode == "Live from ESP32 Sensors":
                 "cnn_prob": cnn_prob,
                 "rf_prob": rf_prob
             }
+            shared["dashboard_timestamp"] = time.time()
             with open("shared_data.json", "w") as f:
                 json.dump(shared, f)
         except:
@@ -262,7 +263,8 @@ else:
         "Vibration": np.sqrt(np.mean(raw_data**2)),
         "RPM": 8500 if force_rpm else random.randint(2800, 3200),
         "Current": sim_current,
-        "Signal": 95
+        "Signal": 95,
+        "Core Temp": 95.0 if force_temp else random.uniform(34.0, 37.0)
     }
     
     # RF relies on Temperature, Torque, Tool wear. 
@@ -290,6 +292,7 @@ else:
             "cnn_prob": cnn_prob,
             "rf_prob": rf_prob
         }
+        shared["dashboard_timestamp"] = time.time()
         with open("shared_data.json", "w") as f:
             json.dump(shared, f)
     except: pass

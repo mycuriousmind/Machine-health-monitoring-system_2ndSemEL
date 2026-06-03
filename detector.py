@@ -76,19 +76,17 @@ def main():
     
     # Telemetry Labels with Unique Colors
     labels = [
-        {"name": "Temperature", "pos": (0.5, 0.2), "unit": "C", "color": (0, 0, 255)},    # Red
-        {"name": "Vibration", "pos": (0.2, 0.5), "unit": "Hz", "color": (255, 0, 0)},   # Blue
-        {"name": "Signal", "pos": (0.8, 0.5), "unit": "%", "color": (0, 255, 0)},      # Green
+        {"name": "Current", "pos": (0.5, 0.2), "unit": " A", "color": (0, 0, 255)},      # Red
+        {"name": "Signal", "pos": (0.8, 0.5), "unit": "%", "color": (0, 255, 0)},       # Green
         {"name": "Core Temp", "pos": (0.5, 0.5), "unit": "C", "color": (0, 255, 255)},  # Yellow
-        {"name": "RPM", "pos": (0.5, 0.8), "unit": "", "color": (255, 0, 255)}    # Magenta
+        {"name": "RPM", "pos": (0.5, 0.8), "unit": "", "color": (255, 0, 255)}         # Magenta
     ]
 
     # Telemetry Data Cache (to prevent flickering values)
     telemetry_cache = {
-        "Temperature": 35.0,
-        "Vibration": 0.0,
+        "Current": 0.0,
         "Signal": 100,
-        "Core Temp": 45.0,
+        "Core Temp": 35.0,
         "RPM": 3000
     }
     vibration_buffer = np.zeros((100, 3), dtype=np.float32)
@@ -179,11 +177,15 @@ def main():
                 rx1, ry1, rx2, ry2 = current_M
                 cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (255, 255, 255), 2)
 
-                # --- CHECK ESP32 STATUS ---
+                # --- CHECK ESP32 & DASHBOARD STATUS ---
                 shared_data = get_shared_data()
                 esp_data = shared_data.get("esp_data", {})
+                dashboard_timestamp = shared_data.get("dashboard_timestamp", 0.0)
                 
-                if time.time() - esp_data.get("Timestamp", 0) > 5:
+                is_esp_active = (time.time() - esp_data.get("Timestamp", 0.0) < 5.0)
+                is_dashboard_active = (time.time() - dashboard_timestamp < 5.0)
+                
+                if not is_esp_active and not is_dashboard_active:
                     # Disconnected
                     cv2.putText(display_frame, "CONNECT ESP32", (w_frame//2 - 180, 100), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
@@ -196,58 +198,88 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2)
                         
                 else:
-                    # Real ESP32 Data
-                    real_temp = esp_data.get("Temperature", 35.0)
-                    real_current = esp_data.get("Current", 0.0)
-                    mapped_torque = real_current * 20.0
-                    mapped_rpm = max(0, 3000.0 - (real_current * 100.0))
-                    is_esp_faulty = real_temp > 45.0 or real_current > 3.0
-                    
+                    # Determine active telemetry source
+                    if is_esp_active:
+                        # Real ESP32 Data
+                        real_temp = esp_data.get("Temperature", 35.0)
+                        real_current = esp_data.get("Current", 0.0)
+                        
+                        # Handle NaN values safely
+                        if real_temp is None or (isinstance(real_temp, float) and np.isnan(real_temp)):
+                            real_temp = 35.0
+                        if real_current is None or (isinstance(real_current, float) and np.isnan(real_current)):
+                            real_current = 0.0
+                            
+                        mapped_torque = real_current * 20.0
+                        mapped_rpm = max(0, 3000.0 - (real_current * 100.0))
+                        is_esp_faulty = real_temp > 45.0 or real_current > 3.0
+                        
+                        # Synthesize vibration window for the CNN model based on real mechanical state
+                        t = np.linspace(0, 100 / 12000, 100)
+                        if is_esp_faulty:
+                            f0 = 30.0 
+                            bpfi = f0 * 5.4
+                            sig = 1.0 * np.sin(2*np.pi*f0*t) + 0.4 * np.sin(2*np.pi*bpfi*t) + 0.2 * np.sin(2*np.pi*2*bpfi*t)
+                            for pos in [20, 60]:
+                                sig += 2.0 * np.exp(-200*(np.arange(100)-pos)**2/100)
+                            vibration_buffer = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.2
+                        else:
+                            sig = 0.3 * np.sin(2*np.pi*30.0*t)
+                            vibration_buffer = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.05
+                            
+                        telemetry_vals = {
+                            "Current": real_current,
+                            "Signal": 100,
+                            "Core Temp": real_temp,
+                            "RPM": mapped_rpm,
+                            "Temperature": real_temp,
+                            "Vibration": float(np.sqrt(np.mean(vibration_buffer**2)))
+                        }
+                        
+                        cnn_prob = model_utils.predict_vibration(cnn_model, vibration_buffer, mu_vib, sd_vib)
+                        rf_prob = model_utils.predict_tabular(rf_model, 
+                                                              temperature=real_temp,
+                                                              rpm=mapped_rpm,
+                                                              torque=mapped_torque,
+                                                              tool_wear=100.0)
+                        health_res = model_utils.get_combined_health(cnn_prob, rf_prob, fusion_model)
+                        health_status = health_res["status"]
+                        health_color = (0, 0, 255) if health_status == "FAULTY" else (0, 255, 0)
+                        
+                    else:
+                        # Dashboard Simulation Mode
+                        sim_telemetry = shared_data.get("telemetry", {})
+                        temp_val = sim_telemetry.get("Temperature", 35.0)
+                        curr_val = sim_telemetry.get("Current", 0.0)
+                        is_esp_faulty = temp_val > 45.0 or curr_val > 3.0
+                        
+                        telemetry_vals = {
+                            "Current": curr_val,
+                            "Signal": sim_telemetry.get("Signal", 95),
+                            "Core Temp": temp_val,
+                            "RPM": sim_telemetry.get("RPM", 3000),
+                            "Temperature": temp_val,
+                            "Vibration": sim_telemetry.get("Vibration", 0.0)
+                        }
+                        
+                        health_info = shared_data.get("health", {})
+                        health_status = health_info.get("status", "HEALTHY")
+                        health_color = (0, 0, 255) if health_status == "FAULTY" else (0, 255, 0)
+                        
+                    # Update cache
+                    for lbl in labels:
+                        telemetry_cache[lbl["name"]] = telemetry_vals.get(lbl["name"], 0.0)
+                        
                     hud_x_start = w_frame - 300
                     hud_y_start = 80
-                    
                     for i, lbl in enumerate(labels):
-                        # Map ESP data to telemetry cache
-                        if "Temperature" in lbl["name"]:
-                            telemetry_cache[lbl["name"]] = real_temp
-                        elif "RPM" in lbl["name"]:
-                            telemetry_cache[lbl["name"]] = mapped_rpm
-                        elif "Signal" in lbl["name"]:
-                            telemetry_cache[lbl["name"]] = 100
-                        elif "Vibration" in lbl["name"]:
-                            t = np.linspace(0, 100 / 12000, 100)
-                            if is_esp_faulty:
-                                f0 = 30.0 
-                                bpfi = f0 * 5.4
-                                sig = 1.0 * np.sin(2*np.pi*f0*t) + 0.4 * np.sin(2*np.pi*bpfi*t) + 0.2 * np.sin(2*np.pi*2*bpfi*t)
-                                for pos in [20, 60]:
-                                    sig += 2.0 * np.exp(-200*(np.arange(100)-pos)**2/100)
-                                vibration_buffer = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.2
-                            else:
-                                sig = 0.3 * np.sin(2*np.pi*30.0*t)
-                                vibration_buffer = np.stack([sig, sig, sig], axis=1).astype(np.float32) + np.random.randn(100, 3).astype(np.float32) * 0.05
-                                
-                            telemetry_cache[lbl["name"]] = float(np.sqrt(np.mean(vibration_buffer**2)))
-                            
-                            # Real-time Inference using mapped ESP data
-                            cnn_prob = model_utils.predict_vibration(cnn_model, vibration_buffer, mu_vib, sd_vib)
-                            rf_prob = model_utils.predict_tabular(rf_model, 
-                                                                  temperature=real_temp,
-                                                                  rpm=mapped_rpm,
-                                                                  torque=mapped_torque,
-                                                                  tool_wear=100.0)
-                            
-                            health_res = model_utils.get_combined_health(cnn_prob, rf_prob, fusion_model)
-                            health_status = health_res["status"]
-                            prob = health_res["fused_prob"]
-                            
-                            health_color = (0, 0, 255) if health_status == "FAULTY" else (0, 255, 0)
-                            
-                        # Draw label
                         val = telemetry_cache.get(lbl["name"], 0)
-                        val_str = f"{val:.1f}" if isinstance(val, float) else str(val)
+                        if "Current" in lbl["name"]:
+                            val_str = f"{val:.2f}"
+                        else:
+                            val_str = f"{val:.1f}" if isinstance(val, float) else str(val)
+                            
                         full_label = f"{lbl['name']}: {val_str}{lbl['unit']}"
-                        
                         tx, ty = hud_x_start, hud_y_start + (i * 45)
                         color = (0, 0, 255) if is_esp_faulty else lbl["color"]
                         
@@ -269,23 +301,32 @@ def main():
                         cv2.putText(display_frame, full_label, (tx + 10, ty), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
-
                 # -- Dashboard Sync (Optimized: Outside loop) --
                 if frame_count % 10 == 0:
                     try:
-                        # Save current telemetry
-                        shared_payload = {
-                            "telemetry": telemetry_cache,
-                            "fault_triggers": fault_triggers,
-                            "health": {
-                                "status": health_status, 
-                                "fused_prob": health_res["fused_prob"] if 'health_res' in locals() else 0.0,
-                                "cnn_prob": health_res["cnn_prob"] if 'health_res' in locals() else 0.0,
-                                "rf_prob": health_res["rf_prob"] if 'health_res' in locals() else 0.0
+                        # Save current telemetry (only when ESP is active, so we don't overwrite simulated values)
+                        if is_esp_active:
+                            shared_payload = {
+                                "telemetry": {
+                                    "Temperature": telemetry_vals.get("Temperature", 35.0),
+                                    "Vibration": telemetry_vals.get("Vibration", 0.0),
+                                    "RPM": telemetry_vals.get("RPM", 3000),
+                                    "Signal": telemetry_vals.get("Signal", 100),
+                                    "Core Temp": telemetry_vals.get("Temperature", 35.0),
+                                    "Current": telemetry_vals.get("Current", 0.0)
+                                },
+                                "fault_triggers": fault_triggers,
+                                "health": {
+                                    "status": health_status, 
+                                    "fused_prob": health_res["fused_prob"] if 'health_res' in locals() else 0.0,
+                                    "cnn_prob": health_res["cnn_prob"] if 'health_res' in locals() else 0.0,
+                                    "rf_prob": health_res["rf_prob"] if 'health_res' in locals() else 0.0
+                                }
                             }
-                        }
-                        with open("shared_data.json", "w") as f:
-                            json.dump(shared_payload, f)
+                            shared = get_shared_data() or {}
+                            shared.update(shared_payload)
+                            with open("shared_data.json", "w") as f:
+                                json.dump(shared, f)
                             
                         # Load dashboard faults
                         if os.path.exists("shared_data.json"):
@@ -306,6 +347,10 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, health_color, 2)
                 if 'health_res' in locals():
                     probs_str = f"CNN: {health_res['cnn_prob']:.2f} | RF: {health_res['rf_prob']:.2f}"
+                    cv2.putText(display_frame, probs_str, (hud_x + 10, hud_y + 45),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                elif 'health_info' in locals():
+                    probs_str = f"CNN: {health_info.get('cnn_prob', 0.0):.2f} | RF: {health_info.get('rf_prob', 0.0):.2f}"
                     cv2.putText(display_frame, probs_str, (hud_x + 10, hud_y + 45),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 

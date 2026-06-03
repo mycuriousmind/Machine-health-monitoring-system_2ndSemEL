@@ -30,13 +30,16 @@ def main():
         print("You can run this script with: python serial_bridge.py --port COM4")
         return
 
+    vibration_buffer = [[0.0, 0.0, 0.0] for _ in range(100)]
+
     while True:
         try:
             if ser.in_waiting > 0:
                 line = ser.readline().decode('utf-8', errors='ignore').strip()
                 if line:
                     print(f"ESP32: {line}")
-                    # Parse "Temp: 34.5°C | Current: 2.1"
+                    
+                    # Format 1: "Temp: 34.5°C | Current: 2.1"
                     if "Temp:" in line and "Current:" in line:
                         parts = line.split("|")
                         temp_str = parts[0].replace("Temp:", "").replace("°C", "").strip()
@@ -58,6 +61,34 @@ def main():
                                 
                         except ValueError:
                             pass
+                    
+                    # Format 2: "ax,ay,az,temp,current" (comma-separated values from MPU6050/ACS712 code)
+                    else:
+                        parts = line.split(",")
+                        if len(parts) == 5:
+                            try:
+                                ax = float(parts[0])
+                                ay = float(parts[1])
+                                az = float(parts[2])
+                                temp = float(parts[3])
+                                curr = float(parts[4])
+                                
+                                vibration_buffer.pop(0)
+                                vibration_buffer.append([ax, ay, az])
+                                
+                                shared = get_shared_data()
+                                shared["esp_data"] = {
+                                    "Temperature": temp,
+                                    "Current": curr,
+                                    "VibrationBuffer": list(vibration_buffer),
+                                    "Timestamp": time.time()
+                                }
+                                
+                                with open("shared_data.json", "w") as f:
+                                    json.dump(shared, f)
+                                    
+                            except ValueError:
+                                pass
         except Exception as e:
             print(f"Error reading from serial: {e}")
             time.sleep(1)
