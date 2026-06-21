@@ -1,0 +1,25 @@
+{
+    "nodered": {
+        "enabled": true,
+        "url": "http://localhost:1880",
+        "telemetry_endpoint": "/api/telemetry",
+        "alert_endpoint": "/api/alert"
+    },
+    "influxdb": {
+        "enabled": true,
+        "url": "http://localhost:8086",
+        "org": "machine-health",
+        "bucket": "telemetry",
+        "token": "YOUR_INFLUXDB_TOKEN_HERE"
+    },
+    "back4app": {
+        "enabled": true,
+        "server_url": "https://parseapi.back4app.com",
+        "app_id": "YOUR_BACK4APP_APP_ID",
+        "rest_api_key": "YOUR_BACK4APP_REST_API_KEY",
+        "classes": {
+            "machine_event": "MachineEvent",
+            "maintenance_log": "MaintenanceLog"
+        }
+    }
+}

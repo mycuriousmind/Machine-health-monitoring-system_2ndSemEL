@@ -9,6 +9,9 @@ import subprocess
 import random
 import sys
 from cloud_manager import CloudManager
+from nodered_client import NodeREDClient
+from influxdb_manager import InfluxDBManager
+from back4app_manager import Back4AppManager
 
 # -- Set Page Config -----------------------------------------
 st.set_page_config(
@@ -21,7 +24,22 @@ st.set_page_config(
 def get_cloud_manager():
     return CloudManager()
 
+@st.cache_resource
+def get_nodered_client():
+    return NodeREDClient()
+
+@st.cache_resource
+def get_influxdb_manager():
+    return InfluxDBManager()
+
+@st.cache_resource
+def get_back4app_manager():
+    return Back4AppManager()
+
 cloud_mgr = get_cloud_manager()
+nodered_client = get_nodered_client()
+influx_mgr = get_influxdb_manager()
+back4app_mgr = get_back4app_manager()
 
 # -- Load ML Models ------------------------------------------
 @st.cache_resource
@@ -195,6 +213,63 @@ with st.sidebar:
     st.markdown(f"**Status**: :{status_color}[{cloud_mgr.last_status}]")
     if cloud_mgr.last_error:
         st.caption(f"Error: {cloud_mgr.last_error}")
+
+    # ── Node-RED Status ──────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🔴 Node-RED")
+    nr_status = nodered_client.last_status
+    nr_color = "green" if "Connected" in nr_status else ("red" if "Error" in nr_status or "Failed" in nr_status else "gray")
+    st.markdown(f"**Status**: :{nr_color}[{nr_status}]")
+    if nodered_client.enabled:
+        st.caption(f"URL: {nodered_client.base_url}")
+        st.markdown(f"[Open Node-RED UI →]({nodered_client.base_url})")
+    else:
+        st.caption("Node-RED is disabled in integration_config.json")
+    if nodered_client.last_error:
+        st.caption(f"Error: {nodered_client.last_error}")
+
+    # ── InfluxDB Status ──────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📊 InfluxDB")
+    inf_status = influx_mgr.last_status
+    inf_color = "green" if "Connected" in inf_status else ("red" if "Error" in inf_status else "gray")
+    st.markdown(f"**Status**: :{inf_color}[{inf_status}]")
+    if influx_mgr.enabled:
+        inf_url = influx_mgr.config.get("url", "http://localhost:8086")
+        st.caption(f"Bucket: {influx_mgr.config.get('bucket', 'telemetry')}")
+        st.markdown(f"[Open InfluxDB UI →]({inf_url})")
+    else:
+        st.caption("InfluxDB is disabled in integration_config.json")
+    if influx_mgr.last_error:
+        st.caption(f"Error: {influx_mgr.last_error}")
+
+    # ── Back4App Status ──────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("☁️ Back4App")
+    b4a_status = back4app_mgr.last_status
+    b4a_color = "green" if "Connected" in b4a_status else ("red" if "Error" in b4a_status else "gray")
+    st.markdown(f"**Status**: :{b4a_color}[{b4a_status}]")
+    if back4app_mgr.enabled:
+        st.caption("Parse Server: Back4App Cloud")
+    else:
+        st.caption("Back4App is disabled in integration_config.json")
+    if back4app_mgr.last_error:
+        st.caption(f"Error: {back4app_mgr.last_error}")
+
+    # ── Maintenance Log (Back4App) ───────────────────────────────
+    st.markdown("---")
+    st.subheader("🔧 Maintenance Log")
+    maint_action = st.selectbox("Action", [
+        "BATTERY_REPLACED", "CALIBRATION", "SENSOR_CLEANED",
+        "SYSTEM_RESTART", "INSPECTION", "OTHER"
+    ])
+    maint_notes = st.text_input("Notes (optional)", value="")
+    if st.button("📝 Log Maintenance", use_container_width=True):
+        result = back4app_mgr.log_maintenance(action=maint_action, notes=maint_notes)
+        if result:
+            st.success(f"Logged: {maint_action} (ID: {result.get('objectId', 'N/A')})")
+        else:
+            st.warning("Could not log maintenance. Check Back4App config.")
 
 # -- Main Execution Loop -------------------------------------
 if 'history' not in st.session_state:
@@ -457,6 +532,7 @@ with c2:
     fig_hist.update_layout(title="Fault Probability History", template="plotly_dark", height=150, margin=dict(l=20, r=20, t=40, b=20), yaxis=dict(range=[0, 1]))
     st.plotly_chart(fig_hist, use_container_width=True)
 
+# ═══ MULTI-PLATFORM CLOUD UPLOAD ═══════════════════════════════════════════
 # Upload telemetry to ThingSpeak (handled and rate-limited automatically)
 cloud_mgr.upload_telemetry(
     temp=telemetry.get("Temperature", 0.0),
@@ -469,6 +545,139 @@ cloud_mgr.upload_telemetry(
     rf_prob=rf_prob
 )
 
+# Push to Node-RED (fans out to InfluxDB, Back4App, ThingSpeak via flow)
+nodered_client.push_telemetry(
+    temp=telemetry.get("Temperature", 0.0),
+    current=telemetry.get("Current", 0.0),
+    vibration=telemetry.get("Vibration", 0.0),
+    rpm=telemetry.get("RPM", 0.0),
+    battery=telemetry.get("Battery", 100.0),
+    fused_prob=prob,
+    cnn_prob=cnn_prob,
+    rf_prob=rf_prob
+)
+
+# Direct write to InfluxDB (in addition to Node-RED routing, for reliability)
+influx_mgr.write_telemetry(
+    temp=telemetry.get("Temperature", 0.0),
+    current=telemetry.get("Current", 0.0),
+    vibration=telemetry.get("Vibration", 0.0),
+    rpm=telemetry.get("RPM", 0.0),
+    battery=telemetry.get("Battery", 100.0),
+    fused_prob=prob,
+    cnn_prob=cnn_prob,
+    rf_prob=rf_prob
+)
+
+# Log fault events to Back4App when detected
+if is_faulty:
+    back4app_mgr.log_machine_event(
+        event_type="FAULT_DETECTED",
+        severity="CRITICAL" if prob >= 0.8 else "WARNING",
+        description=f"Fused AI fault detected (confidence: {prob*100:.1f}%)",
+        telemetry={
+            "temperature": telemetry.get("Temperature", 0.0),
+            "current": telemetry.get("Current", 0.0),
+            "vibration": telemetry.get("Vibration", 0.0),
+            "rpm": telemetry.get("RPM", 0.0),
+            "battery": telemetry.get("Battery", 100.0),
+        },
+        ai_predictions={
+            "fused_prob": prob,
+            "cnn_prob": cnn_prob,
+            "rf_prob": rf_prob
+        }
+    )
+
+# ═══ HISTORICAL ANALYTICS (InfluxDB) ══════════════════════════════════════
+st.divider()
+st.markdown("### 📈 Historical Analytics (InfluxDB)")
+
+ha1, ha2 = st.columns(2)
+
+with ha1:
+    # Health history from InfluxDB
+    health_history = influx_mgr.query_health_history(hours=24)
+    if health_history:
+        fig_health = go.Figure()
+        times = [r["time"] for r in health_history]
+        fig_health.add_trace(go.Scatter(
+            x=times, y=[r["fused_prob"] for r in health_history],
+            name="Fused Prob", fill="tozeroy",
+            line=dict(color="#ef4444", width=2)
+        ))
+        fig_health.add_trace(go.Scatter(
+            x=times, y=[r["cnn_prob"] for r in health_history],
+            name="CNN Prob", line=dict(color="#3b82f6", width=1, dash="dot")
+        ))
+        fig_health.add_trace(go.Scatter(
+            x=times, y=[r["rf_prob"] for r in health_history],
+            name="RF Prob", line=dict(color="#10b981", width=1, dash="dot")
+        ))
+        fig_health.update_layout(
+            title="24h Fault Probability Trend (InfluxDB)",
+            template="plotly_dark", height=250,
+            margin=dict(l=20, r=20, t=40, b=20),
+            yaxis=dict(range=[0, 1], title="Probability"),
+            xaxis=dict(title="Time")
+        )
+        st.plotly_chart(fig_health, use_container_width=True)
+    else:
+        st.info("No historical data in InfluxDB yet. Data will appear after InfluxDB is running and receiving telemetry.")
+
+with ha2:
+    # Statistics from InfluxDB
+    stats = influx_mgr.get_statistics(hours=24)
+    if stats:
+        st.markdown("**24h Statistics**")
+        stats_data = []
+        for field, values in stats.items():
+            stats_data.append({
+                "Metric": field.replace("_", " ").title(),
+                "Min": f"{values['min']:.2f}",
+                "Max": f"{values['max']:.2f}",
+                "Mean": f"{values['mean']:.2f}",
+                "Points": values['count']
+            })
+        st.dataframe(stats_data, use_container_width=True, hide_index=True)
+    else:
+        st.info("Statistics will be available once InfluxDB has data.")
+
+# ═══ CLOUD EVENT LOG (Back4App) ═══════════════════════════════════════════
+st.divider()
+st.markdown("### 🔔 Cloud Event Log (Back4App)")
+
+el1, el2 = st.columns([2, 1])
+
+with el1:
+    events = back4app_mgr.get_recent_events(limit=10)
+    if events:
+        event_display = []
+        for evt in events:
+            severity = evt.get("severity", "INFO")
+            icon = "🔴" if severity == "CRITICAL" else ("🟡" if severity == "WARNING" else "🟢")
+            event_display.append({
+                "": icon,
+                "Type": evt.get("eventType", "N/A"),
+                "Severity": severity,
+                "Description": evt.get("description", "")[:60],
+                "Time": evt.get("createdAt", "N/A")[:19].replace("T", " ")
+            })
+        st.dataframe(event_display, use_container_width=True, hide_index=True)
+    else:
+        st.info("No events logged yet. Fault events will appear when the AI detects anomalies.")
+
+with el2:
+    maint = back4app_mgr.get_maintenance_history(limit=5)
+    if maint:
+        st.markdown("**Recent Maintenance**")
+        for m in maint:
+            st.write(f"🔧 **{m.get('action', 'N/A')}** — {m.get('notes', 'No notes')}")
+            st.caption(m.get("createdAt", "")[:19].replace("T", " "))
+    else:
+        st.caption("No maintenance logs yet. Use the sidebar to log maintenance actions.")
+
 # Loop control using rerun
 time.sleep(sim_speed / 1000)
 st.rerun()
+

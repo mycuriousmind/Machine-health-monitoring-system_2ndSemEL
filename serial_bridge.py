@@ -3,6 +3,10 @@ import json
 import os
 import time
 import argparse
+from nodered_client import NodeREDClient
+
+# ── Initialize Node-RED client for IoT data routing ──────────────────────────
+nodered = NodeREDClient()
 
 def get_shared_data():
     if os.path.exists("shared_data.json"):
@@ -82,6 +86,14 @@ def main():
                             
                             with open("shared_data.json", "w") as f:
                                 json.dump(shared, f)
+
+                            # Push to Node-RED for IoT routing → InfluxDB, Back4App, ThingSpeak
+                            nodered.push_telemetry(
+                                temp=temp, current=curr,
+                                vibration=0.0, rpm=0.0,
+                                battery=bat_pct,
+                                fused_prob=0.0, cnn_prob=0.0, rf_prob=0.0
+                            )
                                 
                         except ValueError:
                             pass
@@ -114,6 +126,16 @@ def main():
                                 
                                 with open("shared_data.json", "w") as f:
                                     json.dump(shared, f)
+
+                                # Push to Node-RED for IoT routing → InfluxDB, Back4App, ThingSpeak
+                                import numpy as _np
+                                vib_rms = float(_np.sqrt(_np.mean(_np.array(vibration_buffer)**2)))
+                                nodered.push_telemetry(
+                                    temp=temp, current=curr,
+                                    vibration=vib_rms, rpm=0.0,
+                                    battery=bat_pct,
+                                    fused_prob=0.0, cnn_prob=0.0, rf_prob=0.0
+                                )
                                     
                             except ValueError:
                                 pass

@@ -3,3 +3,4 @@ numpy
 tensorflow
 streamlit
 plotly
+influxdb-client

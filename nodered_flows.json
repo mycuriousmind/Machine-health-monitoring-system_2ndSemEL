@@ -1,0 +1,388 @@
+[
+    {
+        "id": "flow_main",
+        "type": "tab",
+        "label": "Machine Health Monitoring",
+        "disabled": false,
+        "info": "Main telemetry processing flow for Machine Health Monitoring System.\nReceives data from Serial Bridge / Dashboard → routes to InfluxDB, Back4App, and ThingSpeak."
+    },
+
+    {
+        "id": "comment_header",
+        "type": "comment",
+        "z": "flow_main",
+        "name": "═══ MACHINE HEALTH MONITORING — Node-RED Flow ═══",
+        "info": "This flow receives telemetry from the Python serial bridge and dashboard,\nthen fans out to InfluxDB (time-series), Back4App (event log), and ThingSpeak (legacy cloud).",
+        "x": 350,
+        "y": 40,
+        "wires": []
+    },
+
+    {
+        "id": "http_telemetry_in",
+        "type": "http in",
+        "z": "flow_main",
+        "name": "POST /api/telemetry",
+        "url": "/api/telemetry",
+        "method": "post",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 140,
+        "y": 140,
+        "wires": [["parse_telemetry", "debug_raw"]]
+    },
+
+    {
+        "id": "http_telemetry_response",
+        "type": "http response",
+        "z": "flow_main",
+        "name": "200 OK",
+        "statusCode": "200",
+        "headers": {},
+        "x": 850,
+        "y": 140,
+        "wires": []
+    },
+
+    {
+        "id": "debug_raw",
+        "type": "debug",
+        "z": "flow_main",
+        "name": "Raw Telemetry",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "payload.temperature",
+        "statusType": "auto",
+        "x": 380,
+        "y": 80,
+        "wires": []
+    },
+
+    {
+        "id": "parse_telemetry",
+        "type": "function",
+        "z": "flow_main",
+        "name": "Parse & Validate Telemetry",
+        "func": "// Extract telemetry fields from incoming POST body\nvar data = msg.payload;\n\n// Validate required fields\nvar temperature = parseFloat(data.temperature) || 0;\nvar current = parseFloat(data.current) || 0;\nvar vibration = parseFloat(data.vibration) || 0;\nvar rpm = parseFloat(data.rpm) || 0;\nvar battery = parseFloat(data.battery) || 100;\nvar fused_prob = parseFloat(data.fused_prob) || 0;\nvar cnn_prob = parseFloat(data.cnn_prob) || 0;\nvar rf_prob = parseFloat(data.rf_prob) || 0;\nvar timestamp = data.timestamp || new Date().toISOString();\n\n// Build clean telemetry object\nmsg.telemetry = {\n    temperature: temperature,\n    current: current,\n    vibration: vibration,\n    rpm: rpm,\n    battery: battery,\n    fused_prob: fused_prob,\n    cnn_prob: cnn_prob,\n    rf_prob: rf_prob,\n    timestamp: timestamp\n};\n\n// Determine machine status\nvar FAULT_THRESHOLD = 0.5;\nmsg.telemetry.is_faulty = fused_prob >= FAULT_THRESHOLD;\nmsg.telemetry.status = msg.telemetry.is_faulty ? 'FAULTY' : 'HEALTHY';\n\n// Set status display on node\nnode.status({\n    fill: msg.telemetry.is_faulty ? 'red' : 'green',\n    shape: 'dot',\n    text: msg.telemetry.status + ' | T:' + temperature.toFixed(1) + '°C | I:' + current.toFixed(2) + 'A'\n});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 390,
+        "y": 140,
+        "wires": [["influxdb_format", "fault_check", "thingspeak_format", "http_telemetry_response"]]
+    },
+
+    {
+        "id": "comment_influx",
+        "type": "comment",
+        "z": "flow_main",
+        "name": "── InfluxDB Write ──",
+        "info": "",
+        "x": 140,
+        "y": 220,
+        "wires": []
+    },
+
+    {
+        "id": "influxdb_format",
+        "type": "function",
+        "z": "flow_main",
+        "name": "Format for InfluxDB",
+        "func": "// Format telemetry as InfluxDB line protocol compatible payload\nvar t = msg.telemetry;\n\nmsg.payload = [\n    {\n        measurement: 'machine_telemetry',\n        tags: {\n            machine_id: 'esp32_node_01',\n            status: t.status\n        },\n        fields: {\n            temperature: t.temperature,\n            current: t.current,\n            vibration: t.vibration,\n            rpm: t.rpm,\n            battery: t.battery,\n            fused_prob: t.fused_prob,\n            cnn_prob: t.cnn_prob,\n            rf_prob: t.rf_prob\n        },\n        timestamp: new Date()\n    }\n];\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 390,
+        "y": 260,
+        "wires": [["influxdb_out"]]
+    },
+
+    {
+        "id": "influxdb_out",
+        "type": "influxdb out",
+        "z": "flow_main",
+        "name": "Write to InfluxDB",
+        "influxdb": "influxdb_config",
+        "measurement": "machine_telemetry",
+        "precision": "ms",
+        "retentionPolicy": "",
+        "database": "",
+        "precisionV18FluxV20": "ms",
+        "retentionPolicyV18Flux": "",
+        "org": "machine-health",
+        "bucket": "telemetry",
+        "x": 630,
+        "y": 260,
+        "wires": []
+    },
+
+    {
+        "id": "comment_fault",
+        "type": "comment",
+        "z": "flow_main",
+        "name": "── Fault Detection → Back4App ──",
+        "info": "",
+        "x": 180,
+        "y": 340,
+        "wires": []
+    },
+
+    {
+        "id": "fault_check",
+        "type": "function",
+        "z": "flow_main",
+        "name": "Fault Detection Rules",
+        "func": "// Only send to Back4App if a fault condition is detected\nvar t = msg.telemetry;\nvar alerts = [];\n\n// Rule 1: High fused fault probability\nif (t.fused_prob >= 0.5) {\n    alerts.push({\n        eventType: 'FAULT_DETECTED',\n        severity: t.fused_prob >= 0.8 ? 'CRITICAL' : 'WARNING',\n        description: 'Fused AI model detected fault (prob: ' + (t.fused_prob * 100).toFixed(1) + '%)',\n        fusedProb: t.fused_prob,\n        cnnProb: t.cnn_prob,\n        rfProb: t.rf_prob\n    });\n}\n\n// Rule 2: Temperature threshold breach\nif (t.temperature > 45.0) {\n    alerts.push({\n        eventType: 'TEMPERATURE_ALERT',\n        severity: t.temperature > 60.0 ? 'CRITICAL' : 'WARNING',\n        description: 'Temperature exceeded threshold: ' + t.temperature.toFixed(1) + '°C',\n        temperature: t.temperature\n    });\n}\n\n// Rule 3: Overcurrent\nif (t.current > 3.0) {\n    alerts.push({\n        eventType: 'OVERCURRENT_ALERT',\n        severity: t.current > 5.0 ? 'CRITICAL' : 'WARNING',\n        description: 'Current exceeded threshold: ' + t.current.toFixed(2) + 'A',\n        current: t.current\n    });\n}\n\n// Rule 4: Low battery\nif (t.battery < 10.0 && t.battery > 0) {\n    alerts.push({\n        eventType: 'LOW_BATTERY',\n        severity: 'WARNING',\n        description: 'Battery critically low: ' + t.battery.toFixed(1) + '%',\n        battery: t.battery\n    });\n}\n\n// Only proceed if there are alerts\nif (alerts.length > 0) {\n    msg.alerts = alerts;\n    node.status({fill: 'red', shape: 'ring', text: alerts.length + ' alert(s) detected'});\n    return msg;\n} else {\n    node.status({fill: 'green', shape: 'dot', text: 'No faults'});\n    return null;  // Do not send downstream\n}",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 390,
+        "y": 380,
+        "wires": [["back4app_format"]]
+    },
+
+    {
+        "id": "back4app_format",
+        "type": "function",
+        "z": "flow_main",
+        "name": "Format for Back4App",
+        "func": "// Send each alert as a separate Back4App MachineEvent object\n// Process alerts sequentially\nvar alerts = msg.alerts || [];\nvar messages = [];\n\nfor (var i = 0; i < alerts.length; i++) {\n    var alert = alerts[i];\n    var newMsg = {\n        payload: JSON.stringify({\n            eventType: alert.eventType,\n            severity: alert.severity,\n            description: alert.description,\n            machineId: 'esp32_node_01',\n            telemetry: {\n                temperature: msg.telemetry.temperature,\n                current: msg.telemetry.current,\n                vibration: msg.telemetry.vibration,\n                rpm: msg.telemetry.rpm,\n                battery: msg.telemetry.battery\n            },\n            aiPredictions: {\n                fusedProb: msg.telemetry.fused_prob,\n                cnnProb: msg.telemetry.cnn_prob,\n                rfProb: msg.telemetry.rf_prob\n            },\n            resolvedAt: null\n        }),\n        headers: {\n            'X-Parse-Application-Id': global.get('back4app_app_id') || env.get('BACK4APP_APP_ID') || '',\n            'X-Parse-REST-API-Key': global.get('back4app_rest_key') || env.get('BACK4APP_REST_KEY') || '',\n            'Content-Type': 'application/json'\n        }\n    };\n    messages.push(newMsg);\n}\n\n// Send first alert (Node-RED processes one at a time)\nif (messages.length > 0) {\n    node.status({fill: 'yellow', shape: 'dot', text: 'Sending ' + messages.length + ' event(s) to Back4App'});\n    return messages[0];\n}\nreturn null;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 630,
+        "y": 380,
+        "wires": [["back4app_post"]]
+    },
+
+    {
+        "id": "back4app_post",
+        "type": "http request",
+        "z": "flow_main",
+        "name": "POST to Back4App",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "https://parseapi.back4app.com/classes/MachineEvent",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 870,
+        "y": 380,
+        "wires": [["debug_back4app"]]
+    },
+
+    {
+        "id": "debug_back4app",
+        "type": "debug",
+        "z": "flow_main",
+        "name": "Back4App Response",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "payload.objectId",
+        "statusType": "auto",
+        "x": 1070,
+        "y": 380,
+        "wires": []
+    },
+
+    {
+        "id": "comment_thingspeak",
+        "type": "comment",
+        "z": "flow_main",
+        "name": "── ThingSpeak (Legacy Compatibility) ──",
+        "info": "",
+        "x": 200,
+        "y": 460,
+        "wires": []
+    },
+
+    {
+        "id": "thingspeak_format",
+        "type": "function",
+        "z": "flow_main",
+        "name": "Format for ThingSpeak",
+        "func": "// Rate limit ThingSpeak to 15-second intervals\nvar lastSend = flow.get('thingspeak_last_send') || 0;\nvar now = Date.now();\n\nif (now - lastSend < 15000) {\n    node.status({fill: 'grey', shape: 'ring', text: 'Rate limited'});\n    return null;  // Skip this update\n}\n\nflow.set('thingspeak_last_send', now);\n\nvar t = msg.telemetry;\nvar apiKey = global.get('thingspeak_write_key') || env.get('THINGSPEAK_WRITE_KEY') || '';\n\nif (!apiKey) {\n    node.status({fill: 'grey', shape: 'dot', text: 'No API key configured'});\n    return null;\n}\n\n// ThingSpeak update URL with query parameters\nvar params = 'api_key=' + apiKey +\n    '&field1=' + t.temperature.toFixed(2) +\n    '&field2=' + t.current.toFixed(2) +\n    '&field3=' + t.vibration.toFixed(4) +\n    '&field4=' + t.rpm.toFixed(1) +\n    '&field5=' + t.battery.toFixed(1) +\n    '&field6=' + (t.fused_prob * 100).toFixed(1) +\n    '&field7=' + (t.cnn_prob * 100).toFixed(1) +\n    '&field8=' + (t.rf_prob * 100).toFixed(1);\n\nmsg.url = 'https://api.thingspeak.com/update?' + params;\nmsg.payload = '';\n\nnode.status({fill: 'blue', shape: 'dot', text: 'Sending to ThingSpeak'});\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 500,
+        "wires": [["thingspeak_post"]]
+    },
+
+    {
+        "id": "thingspeak_post",
+        "type": "http request",
+        "z": "flow_main",
+        "name": "POST to ThingSpeak",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 650,
+        "y": 500,
+        "wires": [["debug_thingspeak"]]
+    },
+
+    {
+        "id": "debug_thingspeak",
+        "type": "debug",
+        "z": "flow_main",
+        "name": "ThingSpeak Response",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "payload",
+        "statusType": "auto",
+        "x": 890,
+        "y": 500,
+        "wires": []
+    },
+
+    {
+        "id": "comment_alert_in",
+        "type": "comment",
+        "z": "flow_main",
+        "name": "── Alert Endpoint (Manual Alerts) ──",
+        "info": "",
+        "x": 190,
+        "y": 580,
+        "wires": []
+    },
+
+    {
+        "id": "http_alert_in",
+        "type": "http in",
+        "z": "flow_main",
+        "name": "POST /api/alert",
+        "url": "/api/alert",
+        "method": "post",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 140,
+        "y": 640,
+        "wires": [["alert_process"]]
+    },
+
+    {
+        "id": "alert_process",
+        "type": "function",
+        "z": "flow_main",
+        "name": "Process Manual Alert",
+        "func": "var data = msg.payload;\n\nmsg.payload = JSON.stringify({\n    eventType: data.alert_type || 'MANUAL_ALERT',\n    severity: data.severity || 'INFO',\n    description: data.message || 'Manual alert from dashboard',\n    machineId: 'esp32_node_01',\n    source: 'dashboard_manual',\n    resolvedAt: null\n});\n\nmsg.headers = {\n    'X-Parse-Application-Id': global.get('back4app_app_id') || env.get('BACK4APP_APP_ID') || '',\n    'X-Parse-REST-API-Key': global.get('back4app_rest_key') || env.get('BACK4APP_REST_KEY') || '',\n    'Content-Type': 'application/json'\n};\n\nnode.status({fill: 'yellow', shape: 'dot', text: 'Manual alert: ' + (data.alert_type || 'MANUAL')});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 640,
+        "wires": [["back4app_alert_post", "http_alert_response"]]
+    },
+
+    {
+        "id": "back4app_alert_post",
+        "type": "http request",
+        "z": "flow_main",
+        "name": "POST Alert to Back4App",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "https://parseapi.back4app.com/classes/MachineEvent",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 670,
+        "y": 640,
+        "wires": [["debug_alert_response"]]
+    },
+
+    {
+        "id": "http_alert_response",
+        "type": "http response",
+        "z": "flow_main",
+        "name": "200 OK",
+        "statusCode": "200",
+        "headers": {},
+        "x": 650,
+        "y": 700,
+        "wires": []
+    },
+
+    {
+        "id": "debug_alert_response",
+        "type": "debug",
+        "z": "flow_main",
+        "name": "Alert Back4App Response",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 920,
+        "y": 640,
+        "wires": []
+    },
+
+    {
+        "id": "influxdb_config",
+        "type": "influxdb",
+        "hostname": "localhost",
+        "port": "8086",
+        "protocol": "http",
+        "dbname": "",
+        "usetls": false,
+        "tls": "",
+        "influxdbVersion": "2.0",
+        "url": "http://localhost:8086",
+        "rejectUnauthorized": true,
+        "name": "Machine Health InfluxDB",
+        "token": "machine-health-influxdb-token",
+        "org": "machine-health",
+        "bucket": "telemetry"
+    }
+]

@@ -1,0 +1,58 @@
+##############################################################################
+# Docker Compose — Node-RED + InfluxDB 2.x for Machine Health Monitoring
+#
+# Usage:
+#   docker-compose up -d          # start both services
+#   docker-compose down            # stop both services
+#   docker-compose logs -f         # view live logs
+#
+# After first start:
+#   Node-RED UI  → http://localhost:1880
+#   InfluxDB UI  → http://localhost:8086
+#                   User: admin  |  Password: machinehealth123
+##############################################################################
+
+version: "3.8"
+
+services:
+  # ── Node-RED ────────────────────────────────────────────────────────────────
+  nodered:
+    image: nodered/node-red:latest
+    container_name: machine-health-nodered
+    restart: unless-stopped
+    ports:
+      - "1880:1880"
+    volumes:
+      - ./nodered_data:/data
+    environment:
+      - TZ=Asia/Kolkata
+    depends_on:
+      - influxdb
+    networks:
+      - machine-health-net
+
+  # ── InfluxDB 2.x ───────────────────────────────────────────────────────────
+  influxdb:
+    image: influxdb:2
+    container_name: machine-health-influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    volumes:
+      - ./influxdb_data:/var/lib/influxdb2
+      - ./influxdb_config:/etc/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=machinehealth123
+      - DOCKER_INFLUXDB_INIT_ORG=machine-health
+      - DOCKER_INFLUXDB_INIT_BUCKET=telemetry
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=machine-health-influxdb-token
+      - DOCKER_INFLUXDB_INIT_RETENTION=30d
+      - TZ=Asia/Kolkata
+    networks:
+      - machine-health-net
+
+networks:
+  machine-health-net:
+    driver: bridge
