@@ -8,6 +8,7 @@ import json
 import subprocess
 import random
 import sys
+from cloud_manager import CloudManager
 
 # -- Set Page Config -----------------------------------------
 st.set_page_config(
@@ -15,6 +16,12 @@ st.set_page_config(
     page_icon="🤖",
     layout="wide",
 )
+
+@st.cache_resource
+def get_cloud_manager():
+    return CloudManager()
+
+cloud_mgr = get_cloud_manager()
 
 # -- Load ML Models ------------------------------------------
 @st.cache_resource
@@ -161,6 +168,33 @@ with st.sidebar:
             st.rerun()
         except Exception as e:
             st.error(f"Error: {e}")
+
+    st.markdown("---")
+    st.subheader("☁️ Cloud Sync (ThingSpeak)")
+    cfg = cloud_mgr.config
+    cloud_enabled = st.checkbox("Enable Cloud Sync", value=cfg.get("enabled", False))
+    write_key = st.text_input("Write API Key", value=cfg.get("write_api_key", ""), type="password")
+    channel_id = st.text_input("Channel ID", value=cfg.get("channel_id", ""))
+    read_key = st.text_input("Read API Key", value=cfg.get("read_api_key", ""), type="password")
+    update_int = st.number_input("Sync Interval (s)", min_value=15, max_value=300, value=cfg.get("update_interval", 15))
+
+    if st.button("Save Cloud Config", use_container_width=True):
+        cloud_mgr.save_config(cloud_enabled, write_key, channel_id, read_key, update_int)
+        st.success("Config saved!")
+        time.sleep(0.5)
+        st.rerun()
+
+    status_colors = {
+        "Connected & Syncing": "green",
+        "Rate Limited / Update Rejected": "orange",
+        "Network Error": "red",
+        "Disabled": "gray",
+        "Not Connected": "gray"
+    }
+    status_color = status_colors.get(cloud_mgr.last_status, "gray")
+    st.markdown(f"**Status**: :{status_color}[{cloud_mgr.last_status}]")
+    if cloud_mgr.last_error:
+        st.caption(f"Error: {cloud_mgr.last_error}")
 
 # -- Main Execution Loop -------------------------------------
 if 'history' not in st.session_state:
@@ -422,6 +456,18 @@ with c2:
     fig_hist.add_trace(go.Scatter(y=st.session_state.history, fill='tozeroy', line=dict(color='#00ff00' if not is_faulty else '#ff0000')))
     fig_hist.update_layout(title="Fault Probability History", template="plotly_dark", height=150, margin=dict(l=20, r=20, t=40, b=20), yaxis=dict(range=[0, 1]))
     st.plotly_chart(fig_hist, use_container_width=True)
+
+# Upload telemetry to ThingSpeak (handled and rate-limited automatically)
+cloud_mgr.upload_telemetry(
+    temp=telemetry.get("Temperature", 0.0),
+    current=telemetry.get("Current", 0.0),
+    vibration=telemetry.get("Vibration", 0.0),
+    rpm=telemetry.get("RPM", 0.0),
+    battery=telemetry.get("Battery", 100.0),
+    fused_prob=prob,
+    cnn_prob=cnn_prob,
+    rf_prob=rf_prob
+)
 
 # Loop control using rerun
 time.sleep(sim_speed / 1000)

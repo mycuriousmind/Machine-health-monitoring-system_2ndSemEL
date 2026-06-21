@@ -1,1 +1,1 @@
-{"dashboard_faults": {"Temperature": false, "Vibration": false, "RPM": false, "Core Temp": false, "Signal": false}}
+{"dashboard_faults": {"Temperature": false, "Vibration": false, "RPM": false, "Core Temp": false, "Signal": false}, "telemetry": {"Temperature": 34.97360908005364, "Vibration": 
